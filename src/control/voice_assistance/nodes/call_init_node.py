@@ -16,3 +16,4 @@ async def call_init_node(state: dict) -> dict:
     except Exception as e:
         print(f"[call_init_node] Error: {e}")
         return {**state, "speech_error": str(e)}
+    

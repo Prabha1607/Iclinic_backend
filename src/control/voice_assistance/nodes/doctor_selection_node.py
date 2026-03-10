@@ -2,31 +2,22 @@ import json
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.repositories.generic_crud import bulk_get_instance
 from src.data.models.postgres.user import User, ProviderProfile
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import ainvoke_llm
 from src.control.voice_assistance.utils import clear_markdown
 from src.control.voice_assistance.prompts.doctor_selection_node_prompt import (
     NO_DOCTORS_RESPONSE,
-    DOCTOR_MATCH_SYSTEM_PROMPT,
+    DOCTOR_CONVERSATION_PROMPT,
+    DOCTOR_VERIFIER_PROMPT,
+    DOCTOR_INTENT_VERIFIER_PROMPT,
 )
-
-
-DOCTOR_SPEECH_SYSTEM = """
-You are a warm, conversational medical appointment assistant on a voice call.
-Your job is to generate natural, spoken responses — no markdown, no bullet points, no lists.
-Keep responses concise and friendly, as if speaking aloud.
-Respond with ONLY valid JSON, no explanation:
-{"speech": "<your spoken response>"}
-""".strip()
 
 
 async def fetch_doctors(appointment_type_id: int) -> list[dict]:
     async with AsyncSessionLocal() as db:
         users = await bulk_get_instance(User, db, role_id=2, is_active=True, appointment_type_id=appointment_type_id)
-
         doctor_ids = [u.id for u in users]
         all_profiles = await bulk_get_instance(ProviderProfile, db)
         profile_map = {p.user_id: p for p in all_profiles if p.user_id in doctor_ids}
-
         return [
             {
                 "id": u.id,
@@ -40,198 +31,169 @@ async def fetch_doctors(appointment_type_id: int) -> list[dict]:
         ]
 
 
-def _build_doctor_list_lines(doctors: list[dict]) -> str:
+def _doctors_context(doctors: list[dict]) -> str:
     return "\n".join(
-        f"{i+1}. {d['name']} — {d['specialization']}, {d['experience']} years experience, {d['qualification']}"
+        f"{i+1}. id={d['id']} name={d['name']} specialization={d['specialization']} "
+        f"experience={d['experience']}yrs qualification={d['qualification']} bio={d['bio']}"
         for i, d in enumerate(doctors)
     )
 
 
-def _build_doctors_context(doctors: list[dict]) -> str:
-    return "\n".join(
-        f"{i+1}. id={d['id']} name={d['name']} specialization={d['specialization']} experience={d['experience']}yrs"
-        for i, d in enumerate(doctors)
-    )
-
-
-async def _llm_speech(prompt: str, fallback: str) -> str:
+async def _check_user_intent(user_text: str, doctors: list[dict]) -> str:
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
-            ("system", DOCTOR_SPEECH_SYSTEM),
-            ("human", prompt),
+        response = await ainvoke_llm([
+            {"role": "system", "content": DOCTOR_INTENT_VERIFIER_PROMPT},
+            {"role": "user", "content": f"Doctors:\n{_doctors_context(doctors)}\n\nPatient said: {user_text}"},
         ])
-        parsed = json.loads(clear_markdown(response.content.strip()))
-        return parsed.get("speech") or fallback
+        data = json.loads(clear_markdown(response.content.strip()))
+        return data.get("intent", "unknown")
     except Exception as e:
-        print(f"[doctor_selection_node] _llm_speech failed: {e}")
-        return fallback
+        print("[doctor intent verifier error]:", e)
+        return "unknown"
 
 
-async def _auto_select_state(state: dict, doctor: dict, user_change_request: str | None) -> dict:
-    context = (
-        f"The patient previously requested a change: \"{user_change_request}\". "
-        if user_change_request else ""
-    )
-    prompt = (
-        f"{context}"
-        f"There is only one available doctor: {doctor['name']}, {doctor['specialization']}, "
-        f"{doctor['experience']} years of experience, {doctor['qualification']}. "
-        "Inform the patient naturally that this doctor will be seeing them and that you'll now finalize the appointment."
-    )
-    fallback = (
-        f"You'll be seeing {doctor['name']}, {doctor['specialization']} "
-        f"with {doctor['experience']} years of experience. "
-        "Let me now finalize your appointment."
-    )
-    speech = await _llm_speech(prompt, fallback)
-    return {
-        **state,
-        "user_change_request":        None,
-        "doctor_confirmed_id":        doctor["id"],
-        "doctor_confirmed_name":      doctor["name"],
-        "doctor_selection_pending":   False,
-        "doctor_selection_completed": True,
-        "speech_ai_text":             speech,
-    }
-
-
-async def _present_doctors_state(
-    state: dict,
-    doctors: list[dict],
-    intent: str,
-    user_change_request: str | None,
-    previous_doctor_name: str | None,
-) -> dict:
-    if user_change_request and previous_doctor_name:
-        filtered_doctors = [d for d in doctors if d["name"] != previous_doctor_name]
-    else:
-        filtered_doctors = doctors
-
-    if not filtered_doctors:
-        filtered_doctors = doctors
-
-    doctor_list_lines = _build_doctor_list_lines(filtered_doctors)
-    context = (
-        f"The patient previously chose {previous_doctor_name} but now wants to change. "
-        f"Their change request: \"{user_change_request}\". "
-        if user_change_request and previous_doctor_name
-        else ""
-    )
-    prompt = (
-        f"{context}"
-        f"The patient's concern is: {intent.replace('_', ' ')}. "
-        f"Here are the available doctors:\n{doctor_list_lines}\n"
-        "Introduce these doctors conversationally and ask the patient which one they'd prefer. "
-        "Do not use numbered lists or bullet points — speak naturally."
-    )
-    fallback = (
-        f"Based on your {intent.replace('_', ' ')} concern, here are our available doctors: "
-        f"{doctor_list_lines}. Which doctor would you prefer?"
-    )
-    speech = await _llm_speech(prompt, fallback)
-    return {
-        **state,
-        "doctor_selection_pending":   True,
-        "doctor_selection_completed": False,
-        "doctor_list":                filtered_doctors,
-        "speech_ai_text":             speech,
-    }
-
-
-async def _confirmed_doctor_state(
-    state: dict,
-    doctor_id: int,
-    doctor_name: str,
-    user_change_request: str | None,
-) -> dict:
-    context = (
-        f"The patient had previously requested a change: \"{user_change_request}\". "
-        if user_change_request else ""
-    )
-    prompt = (
-        f"{context}"
-        f"The patient has chosen {doctor_name}. "
-        "Confirm this selection warmly and let them know you'll now finalize the appointment."
-    )
-    fallback = (
-        f"Great! I've noted {doctor_name} as your doctor. "
-        "Let me now finalize your appointment."
-    )
-    speech = await _llm_speech(prompt, fallback)
-    return {
-        **state,
-        "user_change_request":        None,
-        "doctor_confirmed_id":        doctor_id,
-        "doctor_confirmed_name":      doctor_name,
-        "doctor_selection_completed": True,
-        "doctor_selection_pending":   False,
-        "speech_ai_text":             speech,
-    }
-
-
-async def _match_doctor_from_response(
-    user_text: str, intent: str, doctors: list[dict]
-) -> tuple[int, str]:
-    doctors_context = _build_doctors_context(doctors)
+async def _verify_selection(user_text: str, doctors: list[dict]) -> tuple[int | None, str | None]:
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
-            ("system", DOCTOR_MATCH_SYSTEM_PROMPT),
-            ("human", f"Doctors:\n{doctors_context}\n\nPatient intent: {intent}\nPatient said: {user_text}\n\nPick the best match."),
+        response = await ainvoke_llm([
+            {"role": "system", "content": DOCTOR_VERIFIER_PROMPT},
+            {"role": "user", "content": f"Doctors:\n{_doctors_context(doctors)}\n\nPatient said: {user_text}"},
         ])
-        parsed = json.loads(clear_markdown(response.content.strip()))
-        return int(parsed["doctor_id"]), str(parsed["doctor_name"])
-    except Exception:
-        return doctors[0]["id"], doctors[0]["name"]
+        data = json.loads(clear_markdown(response.content.strip()))
+        doctor_id = data.get("doctor_id")
+        doctor_name = data.get("doctor_name")
+        return (int(doctor_id), str(doctor_name)) if doctor_id else (None, None)
+    except Exception as e:
+        print("[doctor verifier error]:", e)
+        return None, None
+
+
+def _build_messages(mode: str, history: list[dict], doctors: list[dict], intent: str, previous_doctor: str | None, change_request: str | None) -> list[dict]:
+    seed = history if history else [{"role": "user", "content": "start"}]
+    return [
+        {
+            "role": "system",
+            "content": DOCTOR_CONVERSATION_PROMPT.format(
+                doctors_context=_doctors_context(doctors),
+                intent=intent,
+                mode=mode,
+                previous_doctor=previous_doctor or "none",
+                change_request=change_request or "none",
+            ),
+        },
+        *seed,
+    ]
 
 
 async def doctor_selection_node(state: dict) -> dict:
     print("[doctor_selection_node] -----------------------------")
 
-    user_change_request: str | None  = state.get("user_change_request")
+    user_change_request: str | None = state.get("user_change_request")
     previous_doctor_name: str | None = state.get("doctor_confirmed_name")
-
-    if state.get("doctor_confirmed_id") and not user_change_request:
-        return {**state, "doctor_selection_completed": True}
+    user_text: str = (state.get("speech_user_text") or "").strip()
+    history: list[dict] = list(state.get("doctor_selection_history") or [])
+    intent: str = state.get("mapping_intent") or "general checkup"
 
     try:
         doctors = await fetch_doctors(state.get("mapping_appointment_type_id") or -1)
     except Exception as e:
-        print(f"[doctor_selection_node] Failed to fetch doctors: {e}")
-        return {
-            **state,
-            "doctor_selection_completed": True,
-            "speech_ai_text": NO_DOCTORS_RESPONSE,
-        }
+        print("[doctor_selection_node] fetch failed:", e)
+        return {**state, "doctor_selection_completed": True, "speech_ai_text": NO_DOCTORS_RESPONSE}
 
     if not doctors:
+        return {**state, "doctor_selection_completed": True, "speech_ai_text": NO_DOCTORS_RESPONSE}
+
+    if user_change_request and previous_doctor_name:
+        available_doctors = [d for d in doctors if d["name"] != previous_doctor_name] or doctors
+    else:
+        available_doctors = doctors
+
+    if user_text:
+        history.append({"role": "user", "content": user_text})
+
+    if state.get("doctor_confirmed_id") and not user_change_request:
+        if user_text:
+            user_intent = await _check_user_intent(user_text, doctors)
+            print("[user_intent]:", user_intent)
+
+            if user_intent in ("asking_info", "change_request", "unclear"):
+                messages = _build_messages("handle_question", history, doctors, intent, previous_doctor_name, user_change_request)
+                response = await ainvoke_llm(messages)
+                ai_text = response.content.strip().strip('"').strip("'")
+                history.append({"role": "assistant", "content": ai_text})
+                return {
+                    **state,
+                    "doctor_selection_history": history,
+                    "speech_ai_text": ai_text,
+                    "doctor_selection_completed": False,
+                }
+
+        return {**state, "doctor_selection_completed": True}
+
+    if len(available_doctors) == 1 and not user_change_request:
+        doctor = available_doctors[0]
+        messages = _build_messages("auto_select", history, available_doctors, intent, previous_doctor_name, user_change_request)
+        response = await ainvoke_llm(messages)
+        ai_text = response.content.strip().strip('"').strip("'")
+        history.append({"role": "assistant", "content": ai_text})
         return {
             **state,
+            "user_change_request": None,
+            "doctor_confirmed_id": doctor["id"],
+            "doctor_confirmed_name": doctor["name"],
+            "doctor_selection_pending": False,
             "doctor_selection_completed": True,
-            "speech_ai_text": NO_DOCTORS_RESPONSE,
+            "doctor_selection_history": history,
+            "speech_ai_text": ai_text,
         }
 
-    intent = state.get("mapping_intent", "general checkup")
+    if user_text and state.get("doctor_selection_pending"):
+        user_intent = await _check_user_intent(user_text, available_doctors)
+        print("[user_intent]:", user_intent)
 
-    if len(doctors) == 1:
-        return await _auto_select_state(state, doctors[0], user_change_request)
+        if user_intent == "asking_info":
+            messages = _build_messages("handle_question", history, available_doctors, intent, previous_doctor_name, user_change_request)
+            response = await ainvoke_llm(messages)
+            ai_text = response.content.strip().strip('"').strip("'")
+            history.append({"role": "assistant", "content": ai_text})
+            return {
+                **state,
+                "doctor_selection_history": history,
+                "doctor_selection_pending": True,
+                "doctor_selection_completed": False,
+                "speech_ai_text": ai_text,
+            }
 
-    if not state.get("doctor_selection_pending"):
-        return await _present_doctors_state(
-            state, doctors, intent, user_change_request, previous_doctor_name
-        )
+        if user_intent == "selecting":
+            doctor_id, doctor_name = await _verify_selection(user_text, available_doctors)
+            if doctor_id:
+                messages = _build_messages("confirm_selection", history, available_doctors, intent, previous_doctor_name, user_change_request)
+                response = await ainvoke_llm(messages)
+                ai_text = response.content.strip().strip('"').strip("'")
+                history.append({"role": "assistant", "content": ai_text})
+                return {
+                    **state,
+                    "user_change_request": None,
+                    "doctor_confirmed_id": doctor_id,
+                    "doctor_confirmed_name": doctor_name,
+                    "doctor_selection_completed": True,
+                    "doctor_selection_pending": False,
+                    "doctor_selection_history": history,
+                    "speech_ai_text": ai_text,
+                }
 
-    user_text: str = (state.get("speech_user_text") or "").strip()
-    filtered_doctors = (
-        [d for d in doctors if d["name"] != previous_doctor_name] or doctors
-        if user_change_request and previous_doctor_name
-        else doctors
-    )
+    messages = _build_messages("present_options", history, available_doctors, intent, previous_doctor_name, user_change_request)
+    response = await ainvoke_llm(messages)
+    ai_text = response.content.strip().strip('"').strip("'")
+    print("[ai_response]:", ai_text)
+    history.append({"role": "assistant", "content": ai_text})
 
-    doctor_id, doctor_name = await _match_doctor_from_response(user_text, intent, filtered_doctors)
-    print(f"[doctor_selection_node] selected doctor: id={doctor_id}, name={doctor_name}")
-
-    return await _confirmed_doctor_state(state, doctor_id, doctor_name, user_change_request)
+    return {
+        **state,
+        "doctor_selection_pending": True,
+        "doctor_selection_completed": False,
+        "doctor_list": available_doctors,
+        "doctor_selection_history": history,
+        "speech_ai_text": ai_text,
+    }
 
 

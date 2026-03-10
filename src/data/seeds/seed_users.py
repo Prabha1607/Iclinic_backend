@@ -6,7 +6,6 @@ from src.config.hashing import get_password_hash
 async def seed_users():
     async with AsyncSessionLocal() as session:
         try:
-            # Fix sequence first
             await session.execute(text("""
                 SELECT setval('users_id_seq', COALESCE((SELECT MAX(id) FROM users), 1));
             """))
@@ -45,8 +44,7 @@ async def seed_users():
 
             await session.commit()
 
-            print("User Dharshini seeded successfully with password Dhars@012!")
-
         except Exception as e:
             await session.rollback()
             print("Error seeding user Dharshini:", e)
+

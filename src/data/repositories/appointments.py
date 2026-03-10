@@ -56,3 +56,15 @@ async def get_appointments(
     result = await db.execute(stmt)
     return result.scalars().all()
 
+
+
+
+async def get_instance_by_id(db: AsyncSession,id: int):
+    stmt = (
+        select(Appointment)
+        .where(Appointment.id == id)
+    )
+
+    result = await db.execute(stmt)
+
+    return result.scalar_one_or_none()

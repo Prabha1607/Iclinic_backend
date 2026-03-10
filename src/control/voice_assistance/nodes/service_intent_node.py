@@ -1,44 +1,55 @@
-from src.control.voice_assistance.models import get_llama1
-from src.control.voice_assistance.prompts.service_intent_node_prompt import SERVICE_INTENT_PROMPT
+from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.prompts.service_intent_node_prompt import (
+    SERVICE_INTENT_PROMPT,
+    SERVICE_INTENT_VERIFIER_PROMPT,
+)
+from src.control.voice_assistance.utils import clear_markdown
+import json
+
 
 async def service_intent_node(state: dict) -> dict:
-    
-    user_text = state.get("speech_user_text")
+    print("[service_intent_node] -----------------------------")
 
-    if not user_text:
-        return {
-            **state,
-            "speech_ai_text": "Hi there! This is Front desk Assistance calling from iClinic. We noticed an appointment request come in through our website. How can I help you today? Would you like to book an appointment or cancel an appointment?",
-            "service_type": None,
-        }
+    user_text: str | None = state.get("speech_user_text")
+    history: list[dict] = list(state.get("service_intent_history") or [])
+
+    if user_text:
+        history.append({"role": "user", "content": user_text.strip()})
+
+    seed = history if history else [{"role": "user", "content": "start"}]
+    messages = [{"role": "system", "content": SERVICE_INTENT_PROMPT}, *seed]
 
     try:
-        model = get_llama1()
+        response = await ainvoke_llm(messages)
+        ai_text = response.content.strip().strip('"').strip("'")
+        print("[ai_response]:", ai_text)
 
-        response = await model.ainvoke([
-            ("system", SERVICE_INTENT_PROMPT),
-            ("human", user_text),
-        ])
+        service_type = None
 
-        service = response.content.strip().lower()
+        if user_text:
+            try:
+                verify_messages = [
+                    {"role": "system", "content": SERVICE_INTENT_VERIFIER_PROMPT},
+                    {"role": "user", "content": user_text.strip()},
+                ]
+                verify_response = await ainvoke_llm(verify_messages)
+                data = json.loads(clear_markdown(verify_response.content.strip()))
+                service_type = data.get("service_type")
+                print("[service_type]:", service_type)
+            except Exception as e:
+                print("[verifier error]:", e)
 
-        if service not in ["booking", "cancellation"]:
-            return {
-                **state,
-                "speech_ai_text": "Sorry, I did not understand. Do you want to book an appointment or cancel one?",
-                "service_type": None,
-            }
-
-        patient_id = state.get("identity_patient_id")
+        history.append({"role": "assistant", "content": ai_text})
 
         return {
             **state,
-            "identity_patient_id": patient_id,
-            "service_type": service,
-            "speech_ai_text": None,
+            "service_intent_history": history,
+            "speech_ai_text": ai_text if not service_type else None,
+            "service_type": service_type,
         }
-        
+
     except Exception as e:
+        print("[service_intent_node error]:", e)
         return {
             **state,
             "speech_ai_text": "Something went wrong. Please try again.",

@@ -7,10 +7,11 @@ from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus
 from src.data.repositories.generic_crud import (
     insert_instance,
-    update_instance,
+    update_instance
+)
+from src.data.repositories.appointments import (
     get_instance_by_id
 )
-
 from src.data.models.postgres.available_slot import AvailableSlot
 from src.data.models.postgres.ENUM import SlotStatus
 from sqlalchemy import update
@@ -49,7 +50,6 @@ async def update_appointment(
     try:
         appointment = await get_instance_by_id(
             id=appointment_id,
-            model=Appointment,
             db=db
         )
 
@@ -77,7 +77,6 @@ async def cancel_appointment(
     try:
         appointment = await get_instance_by_id(
             id=appointment_id,
-            model=Appointment,
             db=db
         )
 
@@ -99,8 +98,8 @@ async def cancel_appointment(
 
     except HTTPException:
         raise
-    except Exception:
-        raise Exception("Failed to cancel appointment")
+    except Exception as e:
+        raise Exception(f"Failed to cancel appointment {e}")
     
 async def get_all_appointments_service(
     db: AsyncSession,

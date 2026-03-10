@@ -1,8 +1,9 @@
+from __future__ import annotations
 import json
 from typing import Any, Dict, Optional, Tuple
-
+import re
+from datetime import date, time
 from twilio.twiml.voice_response import Gather, Say
-
 from src.config.settings import settings
 from src.control.voice_assistance.models import ainvoke_llm
 from src.control.voice_assistance.prompts.confirmation_node_prompt import (
@@ -165,30 +166,6 @@ def build_symptoms_text(history: list[dict], topics: list[str]) -> str:
     return "\n\n".join(pairs)
 
 
-def prepare_conversation_history(state: Dict[str, Any], user_text: str) -> list:
-    conversation_history = list(state.get("clarify_conversation_history") or [])
-    if user_text:
-        print("[user_response]:", user_text)
-        conversation_history.append({"role": "user", "content": user_text})
-    return conversation_history
-
-
-# ── Confirmation helpers ──────────────────────────────────────────────────────
-
-async def generate_conversation_response(
-    patient_name: str,
-    phone_number: str,
-    user_text: str,
-) -> str:
-    messages = [
-        {
-            "role": "system",
-            "content": CONVERSATION_PROMPT.format(name=patient_name, phone=phone_number),
-        },
-        {"role": "user", "content": user_text or "start"},
-    ]
-    response = await ainvoke_llm(messages)
-    return response.content.strip()
 
 
 async def verify_user_identity(
@@ -203,7 +180,6 @@ async def verify_user_identity(
 
     return (
         bool(data.get("confirmed", False)),
-        bool(data.get("end_call", False)),
         data.get("corrected_name"),
         data.get("corrected_phone"),
     )
@@ -240,3 +216,171 @@ def make_gather() -> Gather:
         language=settings.LANGUAGE,
     )
 
+
+
+MORNING_START   = time(6,  0)
+MORNING_END     = time(12, 0)
+AFTERNOON_START = time(12, 0)
+AFTERNOON_END   = time(17, 0)
+EVENING_START   = time(17, 0)
+EVENING_END     = time(21, 0)
+
+
+# ---------------------------------------------------------------------------
+# Formatting
+# ---------------------------------------------------------------------------
+
+def format_time(t: time) -> str:
+    """'9:00 AM', '12:30 PM', etc."""
+    return t.strftime("%I:%M %p").lstrip("0")
+
+
+def format_date(d: date) -> str:
+    """'Monday, Jan 06 2025'"""
+    return d.strftime("%A, %b %d %Y")
+
+
+def format_date_iso(d: date) -> str:
+    """'Monday, Jan 06 2025 -> 2025-01-06'  (used in LLM date-option lists)"""
+    return f"{format_date(d)} -> {d.isoformat()}"
+
+
+# ---------------------------------------------------------------------------
+# Period classification
+# ---------------------------------------------------------------------------
+
+def classify_period(t: time) -> str:
+    if MORNING_START <= t < MORNING_END:
+        return "morning"
+    if AFTERNOON_START <= t < AFTERNOON_END:
+        return "afternoon"
+    if EVENING_START <= t < EVENING_END:
+        return "evening"
+    return "night"
+
+
+# ---------------------------------------------------------------------------
+# Slot-list helpers
+# ---------------------------------------------------------------------------
+
+def slots_for_date(all_slots: list[dict], target: date) -> list[dict]:
+    """Return only slots whose date matches *target*."""
+    return [s for s in all_slots if s["date"] == target]
+
+
+def group_slots_by_period(slots: list[dict]) -> dict[str, list[dict]]:
+    """Return {period: [slot, ...]} for every slot in *slots*."""
+    periods: dict[str, list[dict]] = {}
+    for s in slots:
+        periods.setdefault(s["period"], []).append(s)
+    return periods
+
+
+def get_available_dates(all_slots: list[dict]) -> list[date]:
+    """Unique sorted dates present in *all_slots*."""
+    return sorted({s["date"] for s in all_slots})
+
+
+def build_date_options_text(available_dates: list[date]) -> str:
+    """Multi-line string of date options for LLM prompts."""
+    return "\n".join(format_date_iso(d) for d in available_dates)
+
+
+def build_slot_context_text(slots: list[dict], *, use_full_display: bool = False) -> str:
+    """Multi-line string of slot details for LLM prompts."""
+    display_key = "full_display" if use_full_display else "display"
+    return "\n".join(
+        f"slot_id={s['id']} start_time={s['start_time']} end_time={s['end_time']} display={s[display_key]}"
+        for s in slots
+    )
+
+
+# ---------------------------------------------------------------------------
+# Slot filtering
+# ---------------------------------------------------------------------------
+
+def _coerce_time(val: time | str | None) -> time | None:
+    if val is None:
+        return None
+    if isinstance(val, time):
+        return val
+    try:
+        return time.fromisoformat(str(val))
+    except Exception:
+        return None
+
+
+def exclude_previously_selected_slot(
+    slots: list[dict],
+    user_change_request: str | None,
+    prev_start: str | None,
+    prev_end: str | None,
+) -> list[dict]:
+    """
+    When the user wants to change their slot, remove the slot they already
+    had so it won't be offered again.  Falls back to the original list if
+    filtering would leave nothing.
+    """
+    if not user_change_request or not prev_start or not prev_end:
+        return slots
+
+    prev_start_t = _coerce_time(prev_start)
+    prev_end_t   = _coerce_time(prev_end)
+
+    if prev_start_t is None or prev_end_t is None:
+        return slots
+
+    filtered = [
+        s for s in slots
+        if not (
+            _coerce_time(s["start_time"]) == prev_start_t
+            and _coerce_time(s["end_time"]) == prev_end_t
+        )
+    ]
+    return filtered or slots
+
+
+# ---------------------------------------------------------------------------
+# Alternate-date suggestion
+# ---------------------------------------------------------------------------
+
+def get_nearest_alternate_dates(chosen_date: date, available_dates: list[date]) -> list[date]:
+    """
+    Return up to 3 dates nearest to *chosen_date* (1 before + 2 after when
+    possible) from *available_dates*, sorted ascending.
+    """
+    before = sorted([d for d in available_dates if d < chosen_date], reverse=True)
+    after  = sorted([d for d in available_dates if d > chosen_date])
+
+    alts: list[date] = []
+    if before:
+        alts.append(before[0])
+    alts.extend(after[:2])
+
+    if len(alts) < 3:
+        if not before and len(after) >= 3:
+            alts = after[:3]
+        elif not after and len(before) >= 3:
+            alts = sorted(before[:3])
+
+    return sorted(set(alts))[:3]
+
+
+# ---------------------------------------------------------------------------
+# Intent detection
+# ---------------------------------------------------------------------------
+
+_SLOT_CHOICE_RE = re.compile(
+    r"\b(\d{1,2}(:\d{2})?\s*(am|pm)?"
+    r"|morning|afternoon|evening|night"
+    r"|first|second|last|other|another)\b",
+    re.IGNORECASE,
+)
+
+
+def looks_like_slot_choice(text: str) -> bool:
+    """
+    Heuristic: does the user's utterance look like they're picking a time
+    slot rather than issuing a different command?
+    """
+    return bool(_SLOT_CHOICE_RE.search(text))

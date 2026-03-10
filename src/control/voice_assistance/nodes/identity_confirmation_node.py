@@ -1,5 +1,8 @@
 from typing import Dict, Any
-from src.control.voice_assistance.utils import apply_corrections, generate_conversation_response, prepare_conversation_history, verify_user_identity
+from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.prompts.confirmation_node_prompt import CONVERSATION_PROMPT
+from src.control.voice_assistance.utils import apply_corrections, verify_user_identity
+
 
 async def identity_confirmation_node(state: Dict[str, Any]) -> Dict[str, Any]:
 
@@ -8,45 +11,52 @@ async def identity_confirmation_node(state: Dict[str, Any]) -> Dict[str, Any]:
     patient_name: str = (state.get("identity_user_name") or "").strip()
     phone_number: str = (state.get("identity_user_phone") or "").strip()
     user_text: str = (state.get("speech_user_text") or "").strip()
+    conversation_history = list(state.get("clarify_conversation_history") or [])
 
     if not patient_name:
         return state
 
-    conversation_history = prepare_conversation_history(state, user_text)
+    if user_text:
+        conversation_history.append({"role": "user", "content": user_text})
 
     try:
-        sentence = await generate_conversation_response(
-            patient_name, phone_number, user_text
-        )
-    except Exception:
+        history = conversation_history if conversation_history else [{"role": "user", "content": "start"}]
+        messages = [
+            {
+                "role": "system",
+                "content": CONVERSATION_PROMPT.format(
+                    name=patient_name, phone=phone_number
+                ),
+            },
+            *history,
+        ]
+
+        response = await ainvoke_llm(messages)
+        sentence = response.content.strip()
+
+    except Exception as e:
+        print("[LLM ERROR]", e)
         return state
 
     confirmed = False
-    end_call = False
     corrected_name = None
     corrected_phone = None
 
     if user_text:
         try:
-            (
-                confirmed,
-                end_call,
-                corrected_name,
-                corrected_phone,
-            ) = await verify_user_identity(user_text)
+            confirmed, corrected_name, corrected_phone = await verify_user_identity(user_text)
         except Exception as e:
             print("[VERIFIER ERROR]", e)
 
     state = apply_corrections(state, corrected_name, corrected_phone)
 
-    conversation_history.append(
-        {"role": "assistant", "content": sentence}
-    )
+    conversation_history.append({"role": "assistant", "content": sentence})
 
     return {
         **state,
         "clarify_conversation_history": conversation_history,
         "identity_confirmed_user": confirmed,
-        "identity_confirmation_completed": confirmed or end_call,
+        "identity_confirmation_completed": confirmed,
         "speech_ai_text": sentence,
     }
+

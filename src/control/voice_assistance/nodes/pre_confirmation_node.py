@@ -34,20 +34,21 @@ Respond with a single JSON object:
 }
 
 Rules:
-- confirmed = true  → patient clearly said yes / correct / confirmed / go ahead / 
-                       sounds good / book it / okay / alright / sure / yep / 
-                       "go ahead" or phonetic approximations like "gohe", "go ed", "go hed"
-- confirmed = false → patient EXPLICITLY said no / cancel / wrong / stop / 
-                       do not book / don't book / change it
-- uncertain = true  → ANYTHING that is not a clear yes or clear no:
-                       - garbled or unrecognisable words
-                       - short ambiguous fragments
-                       - unrelated statements
-                       - slang or heavily accented approximations of "yes"
+- confirmed = true  → patient clearly agreed, including ANY of:
+                       yes, correct, that's correct, that's right, right, confirmed,
+                       go ahead, sounds good, book it, okay, alright, sure, yep, yeah,
+                       perfect, exactly, absolutely, fine, proceed, do it, all good,
+                       "I'm telling you right", "that is correct", "yes that's fine",
+                       or any phrase that clearly expresses agreement even if informal
+- confirmed = false → patient EXPLICITLY said no / cancel / wrong / stop /
+                       do not book / don't book / change it / that's wrong / incorrect
+- uncertain = true  → reply is completely unrelated, garbled, or truly unrecognisable
+                       (random words, background noise, gibberish with no clear meaning)
                        Set confirmed = false when uncertain = true.
 
-When in doubt, ALWAYS prefer uncertain = true over confirmed = false.
-A false negative (missing a "yes") is far more costly than asking again.
+IMPORTANT: Be generous with confirmed = true. If the patient is expressing agreement
+in any natural way, mark it confirmed. Only mark uncertain if the reply has NO
+recognisable intent at all.
 
 Return ONLY the JSON object, nothing else.
 """.strip()
@@ -132,10 +133,8 @@ async def pre_confirmation_node(state: dict) -> dict:
                 )
 
             snapshot = state.get("booking_context_snapshot") or _build_snapshot(state)
-            re_ask = (
-                "I didn't quite catch that — could you say yes or no? "
-                + await _generate_confirmation_message(snapshot)
-            )
+            confirmation_msg = await _generate_confirmation_message(snapshot)
+            re_ask = f"Sorry, I didn't quite catch that. {confirmation_msg}"
             return update_state(
                 state,
                 booking_awaiting_confirmation=True,
@@ -143,7 +142,8 @@ async def pre_confirmation_node(state: dict) -> dict:
                 pre_confirmation_retry_count=retry_count,
                 speech_ai_text=re_ask,
             )
-
+        
+        
         print("[pre_confirmation_node] User rejected — returning to slot selection")
         return update_state(
             state,

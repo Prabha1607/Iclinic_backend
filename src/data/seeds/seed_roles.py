@@ -1,7 +1,6 @@
 from sqlalchemy import text
 from src.data.clients.postgres_client import AsyncSessionLocal
 
-
 async def seed_roles():
     async with AsyncSessionLocal() as session:
         await session.execute(
@@ -29,5 +28,3 @@ async def seed_roles():
         )
 
         await session.commit()
-
-        

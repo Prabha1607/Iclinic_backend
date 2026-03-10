@@ -69,5 +69,8 @@ class VoiceState(TypedDict):
     cancellation_stage:       Optional[str]
     cancellation_appointment: Optional[Dict]
     cancellation_complete:    Optional[bool]
-
+    cancellation_awaiting_fresh_input: Optional[bool]
+    cancellation_confirmed : Optional[bool]
     user_change_request: Optional[str]
+
+    

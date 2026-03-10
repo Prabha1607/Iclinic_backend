@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, DateTime, ForeignKey, Boolean, Date, Time, Text, Enum, func
+from sqlalchemy import Column, Integer, DateTime, ForeignKey, Boolean, Date, Time, Text, Enum, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from src.data.models.postgres.ENUM import SlotStatus
 from src.data.clients.postgres_client import Base
@@ -22,9 +22,9 @@ class AvailableSlot(Base):
     is_active = Column(Boolean, default=True, server_default="true", nullable=False)
 
     created_at = Column(
-    DateTime(timezone=True),
-    server_default=func.now(),
-    nullable=False
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False
     )
 
     updated_at = Column(
@@ -36,5 +36,6 @@ class AvailableSlot(Base):
 
     provider = relationship("User", foreign_keys=[provider_id], backref="available_slots")
 
-
-    
+    __table_args__ = (
+        UniqueConstraint('provider_id', 'availability_date', 'start_time', 'end_time', name='unique_available_slot'),
+    )

@@ -70,7 +70,7 @@ async def cancel_existing_appointment(
     except HTTPException:
         raise
     except Exception as e:
-        logger.error("Failed to cancel appointment", extra={"error": str(e)})
+        logger.error(f"Failed to cancel appointment {e}", extra={"error": str(e)})
         raise HTTPException(status_code=500, detail="Failed to cancel appointment")
     
 

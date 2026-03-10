@@ -1,5 +1,6 @@
 from fastapi_mail import FastMail, MessageSchema
 from src.control.voice_assistance.config import conf
+from src.control.voice_assistance.utils import update_state
 
 
 async def _send_cancellation_email(to_email: str, body: str) -> None:
@@ -49,23 +50,17 @@ def _build_cancellation_email_body(state: dict) -> str:
 async def cancel_confirmation_node(state: dict) -> dict:
     print("[cancel_confirmation_node] -----------------------------")
 
-    if not state.get("cancellation_complete"):
+    if not state.get("cancellation_confirmed"):
         return state
 
-    if not state.get("cancellation_appointment"):
-        return state
-
-    to_email = state.get("identity_user_email")
-
-    if not to_email:
+    email = state.get("identity_user_email")
+    if not email:
         return state
 
     try:
-        await _send_cancellation_email(to_email, _build_cancellation_email_body(state))
-        print(f"[cancel_confirmation_node] Cancellation email sent to {to_email}")
+        body = _build_cancellation_email_body(state)
+        await _send_cancellation_email(email, body)
     except Exception as e:
-        print(f"[cancel_confirmation_node] Failed to send cancellation email: {e}")
+        print(f"[cancel_confirmation_node] EMAIL ERROR: {type(e).__name__}: {e}")
 
     return state
-
-
