@@ -1,9 +1,11 @@
 from fastapi import APIRouter, Depends, Request, Response, HTTPException,Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.exc import IntegrityError
+from src.schemas.user import UserUpdate
+from src.core.services.user import update_user_service
 import logging
 from src.api.rest.dependencies import get_current_user, get_db
-from src.core.services.user import create_patient_service, get_providers, get_providers_by_type_service, get_roles, get_all_patients
+from src.core.services.user import create_user, get_providers, get_providers_by_type_service, get_roles, get_all_patients
 from src.schemas.user import PatientFullResponse, ProviderFullResponse, UserCreate
 
 logger = logging.getLogger(__name__)
@@ -81,7 +83,7 @@ async def create_patient(
     db: AsyncSession = Depends(get_db)
 ):
     try:
-        created_patient = await create_patient_service(db=db, patient_data=patient)
+        created_patient = await create_user(db=db, user_data=patient)
         return created_patient
     except IntegrityError:
         raise HTTPException(
@@ -92,9 +94,6 @@ async def create_patient(
         print("CREATE PATIENT ERROR:", e)
         raise
         
-
-from src.schemas.user import UserUpdate
-from src.core.services.user import update_user_service
 
 
 @router.put("/update/{user_id}", response_model=PatientFullResponse)

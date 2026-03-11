@@ -45,6 +45,7 @@ class VoiceState(TypedDict):
     doctor_confirmed_id:        Optional[int]
     doctor_confirmed_name:      Optional[str]
 
+    slot_selection_history:   Optional[List[Dict[str, str]]] 
     slot_stage:               Optional[str]
     slot_selection_completed: Optional[bool]
     slot_chosen_date:         Optional[str]
@@ -70,7 +71,5 @@ class VoiceState(TypedDict):
     cancellation_appointment: Optional[Dict]
     cancellation_complete:    Optional[bool]
     cancellation_awaiting_fresh_input: Optional[bool]
-    cancellation_confirmed : Optional[bool]
-    user_change_request: Optional[str]
-
-    
+    cancellation_confirmed:   Optional[bool]
+    user_change_request:      Optional[str]

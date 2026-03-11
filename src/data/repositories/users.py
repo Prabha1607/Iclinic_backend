@@ -1,5 +1,5 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.orm import selectinload
 from src.data.models.postgres.user import PatientProfile, User
 
@@ -73,45 +73,30 @@ async def get_providers_by_type_repo(
 
     return result.scalars().all()
 
-from sqlalchemy import select
-from sqlalchemy.orm import selectinload
 
+async def insert_user( db: AsyncSession, user_data: dict):
 
-async def create_patient_repo(
-    db: AsyncSession,
-    user_data: dict,
-    profile_data: dict
-):
-
-    try:
-        user = User(**user_data)
-
-        db.add(user)
-        await db.flush()
-
-        profile = PatientProfile(
-            user_id=user.id,
-            **profile_data
-        )
-
-        db.add(profile)
-
-        await db.commit()
-
-        stmt = (
-            select(User)
-            .where(User.id == user.id)
-            .options(selectinload(User.patient_profile))
-        )
+        stmt = insert(User).values(**user_data).returning(User.id)
 
         result = await db.execute(stmt)
 
         return result.scalar_one()
 
-    except Exception:
-        await db.rollback()
-        raise Exception("Failed to create patient")
+
+async def insert_patient_profile(
     
+    db: AsyncSession,
+    user_id: int,
+    profile_data: dict
+):
+
+    profile_data["user_id"] = user_id
+
+    stmt = insert(PatientProfile).values(**profile_data)
+
+    await db.execute(stmt)
+
+  
 from sqlalchemy import update, select
 from sqlalchemy.orm import selectinload
 

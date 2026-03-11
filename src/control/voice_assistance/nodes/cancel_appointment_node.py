@@ -73,7 +73,6 @@ async def _handle_ask_confirm(state: dict, user_text: str) -> dict:
             speech_ai_text=(
                 f"Okay, your {appointment_data['type_name']} appointment on "
                 f"{appointment_data['date']} remains scheduled. "
-                f"Is there anything else I can help you with?"
             ),
         )
 

@@ -8,7 +8,7 @@ from src.schemas.user import UserCreate, UserLogin
 from src.config.settings import settings
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 import logging
 
 logger = logging.getLogger(__name__)
@@ -19,19 +19,43 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 @router.post("/register")
 async def register_user(user_data: UserCreate, db: AsyncSession = Depends(get_db)):
     try:
-        await create_user(db=db, user_data=user_data)
-        logger.info("User registered successfully", extra={"email": user_data.email})
+        await create_user(db, user_data)
+
+        logger.info(
+            "User registered successfully",
+            extra={"email": user_data.email}
+        )
+
         return {"message": "User registered successfully"}
 
     except IntegrityError:
-        logger.warning("Registration failed - duplicate entry", extra={"email": user_data.email})
-        raise HTTPException(status_code=400, detail="Email or phone number already exists")
+        logger.warning(
+            "Duplicate email or phone",
+            extra={"email": user_data.email}
+        )
+
+        raise HTTPException(
+            status_code=400,
+            detail="Email or phone number already exists"
+        )
+
+    except SQLAlchemyError as e:
+        logger.error(f"Database error: {str(e)}")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Database error occurred"
+        )
 
     except Exception as e:
-        logger.error(f"Registration unexpected error : {e}", extra={"error": str(e)})
-        raise HTTPException(status_code=500, detail="Something went wrong")
+        logger.exception("Unexpected registration error")
 
+        raise HTTPException(
+            status_code=500,
+            detail="Something went wrong"
+        )
 
+    
 @router.post("/login")
 async def login_user(request: Request, response: Response, user_data: UserLogin, db: AsyncSession = Depends(get_db)):
     try:

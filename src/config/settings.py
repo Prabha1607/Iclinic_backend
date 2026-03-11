@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     EMAIL_USE_CREDENTIALS: bool
 
     EMERGENCY_FORWARD_NUMBER : str
+    TWILIO_VERIFY_SERVICE_SID : str
 
     @property
     def groq_keys_list(self) -> List[str]:

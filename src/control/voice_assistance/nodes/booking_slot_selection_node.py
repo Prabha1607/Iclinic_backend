@@ -1,6 +1,6 @@
 from __future__ import annotations
 import json
-from datetime import date
+from datetime import date, datetime, timezone, timedelta
 from src.control.voice_assistance.models import ainvoke_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 from src.control.voice_assistance.utils import (
@@ -32,13 +32,27 @@ from src.control.voice_assistance.prompts.slot_selection_node_prompt import (
     SLOT_CONVERSATION_PROMPT,
 )
 
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _now_ist() -> datetime:
+    """Return current datetime in IST."""
+    return datetime.now(tz=IST)
+
+
+def _today_ist() -> date:
+    return _now_ist().date()
+
+
+def _now_time_ist():
+    return _now_ist().time()
+
 
 async def _fetch_all_slots(doctor_id: int) -> list[dict]:
     try:
-        from datetime import datetime
         async with AsyncSessionLocal() as db:
-            today = date.today()
-            now_time = datetime.now().time()
+            today = _today_ist()
+            now_time = _now_time_ist()
 
             all_slots = await bulk_get_instance(AvailableSlot, db, provider_id=doctor_id, is_active=True)
             future_available = [
@@ -94,7 +108,11 @@ def _parse_date(value: str | None) -> date | None:
         return None
 
 
-async def _speak(history: list[dict], doctor_name: str, situation: str, context: str, fallback: str) -> str:
+async def _speak(history: list[dict], doctor_name: str, situation: str, context: str) -> str:
+    """
+    Generate a spoken response entirely via LLM.
+    No hardcoded fallback — the LLM always decides what to say.
+    """
     seed = history if history else [{"role": "user", "content": "start"}]
     messages = [
         {
@@ -112,7 +130,7 @@ async def _speak(history: list[dict], doctor_name: str, situation: str, context:
         return response.content.strip().strip('"').strip("'")
     except Exception as e:
         print("[_speak] error:", e)
-        return fallback
+        return f"I'm sorry, I ran into a technical issue. Could you please repeat that?"
 
 
 async def _resolve_and_confirm_slot(state: dict, matched_slot: dict) -> dict:
@@ -132,9 +150,8 @@ async def _handle_initial(state: dict, doctor_name: str) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     ai_text = await _speak(
         history, doctor_name,
-        situation="opening — ask the patient what date they'd like",
+        situation="opening — greet the patient warmly and ask what date they'd like to book",
         context=f"Doctor: {doctor_name}",
-        fallback=f"Now let's find a good time with {doctor_name}. What date were you thinking?",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_date", slot_selection_completed=False, speech_ai_text=ai_text, slot_selection_history=history)
@@ -152,15 +169,14 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
         filtered_slots = all_slots
         filtered_dates = available_dates
 
-    parsed = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=date.today().isoformat()), human=user_text)
+    parsed = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()), human=user_text)
     chosen_date = _parse_date(parsed.get("date"))
 
     if chosen_date is None:
         ai_text = await _speak(
             history, doctor_name,
-            situation="couldn't understand the date the patient said — ask them to clarify",
+            situation="couldn't understand the date the patient mentioned — ask them to clarify with an example like 'March 8' or 'next Monday'",
             context=f"Change request: {user_change_request or 'none'}, Previous date: {format_date(previous_date) if previous_date else 'none'}",
-            fallback="Sorry, I didn't quite catch that. Did you have a particular date in mind? You can say something like 'March 8' or 'next Monday'.",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -169,9 +185,8 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
         alt_dates = [d for d in filtered_dates[:3] if d != previous_date]
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient picked the same date they already had — offer alternate dates",
-            context=f"Same date: {format_date(chosen_date)}, Alternate dates: {', '.join(format_date(d) for d in alt_dates)}",
-            fallback=f"That's the same date you had before. Here are some other available dates with {doctor_name}: {', '.join(format_date(d) for d in alt_dates)}. Which would you prefer?",
+            situation="patient picked the same date they already had — gently point that out and offer the alternate dates listed in context",
+            context=f"Same date chosen: {format_date(chosen_date)}, Alternate available dates: {', '.join(format_date(d) for d in alt_dates)}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -181,9 +196,8 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
     if date_slots:
         ai_text = await _speak(
             history, doctor_name,
-            situation="confirm the date the patient chose before proceeding",
+            situation="confirm the date the patient just chose before proceeding",
             context=f"Chosen date: {format_date(chosen_date)}, Doctor: {doctor_name}",
-            fallback=f"Got it — {format_date(chosen_date)}. Just to confirm, you'd like to book with {doctor_name} on that date. Is that correct?",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="confirm_date", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
@@ -192,18 +206,16 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
     if not alts:
         ai_text = await _speak(
             history, doctor_name,
-            situation="doctor has no upcoming availability at all",
+            situation="the doctor has absolutely no upcoming availability — apologise and inform the patient",
             context=f"Doctor: {doctor_name}",
-            fallback=f"I'm sorry, {doctor_name} has no upcoming availability right now.",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_date", speech_ai_text=ai_text, slot_selection_history=history)
 
     ai_text = await _speak(
         history, doctor_name,
-        situation="requested date has no slots — offer nearest alternate dates",
-        context=f"Requested: {format_date(chosen_date)}, Alternates: {', '.join(format_date(d) for d in alts)}",
-        fallback=f"Unfortunately {doctor_name} isn't available on {format_date(chosen_date)}. The nearest available dates are {', '.join(format_date(d) for d in alts)}. Would any of those work for you?",
+        situation="requested date has no slots — apologise and offer the nearest alternate dates listed in context",
+        context=f"Requested date: {format_date(chosen_date)}, Nearest available dates: {', '.join(format_date(d) for d in alts)}",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -221,7 +233,7 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
         date_slots = slots_for_date(all_slots, chosen_date)
         return await _proceed_to_period({**state, "user_change_request": None, "slot_selection_history": history}, doctor_name, chosen_date, date_slots)
 
-    parsed2 = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=date.today().isoformat()), human=user_text)
+    parsed2 = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()), human=user_text)
     new_date = _parse_date(parsed2.get("date"))
 
     if user_change_request and chosen_date:
@@ -236,9 +248,8 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
         if date_slots:
             ai_text = await _speak(
                 history, doctor_name,
-                situation="patient gave a new date — confirm it",
+                situation="patient gave a new date instead of confirming — acknowledge it and ask them to confirm this new date",
                 context=f"New date: {format_date(new_date)}, Doctor: {doctor_name}",
-                fallback=f"Got it — {format_date(new_date)}. Confirming with {doctor_name} on that date. Is that correct?",
             )
             history.append({"role": "assistant", "content": ai_text})
             return update_state(state, slot_stage="confirm_date", slot_chosen_date=new_date, speech_ai_text=ai_text, slot_selection_history=history)
@@ -246,18 +257,16 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
         alts = get_nearest_alternate_dates(new_date, filtered_dates)
         ai_text = await _speak(
             history, doctor_name,
-            situation="new date patient gave also has no slots — offer alternates",
-            context=f"Requested: {format_date(new_date)}, Alternates: {', '.join(format_date(d) for d in alts)}",
-            fallback=f"Unfortunately {doctor_name} isn't available on {format_date(new_date)}. The nearest available dates are {', '.join(format_date(d) for d in alts)}. Would any of those work?",
+            situation="the new date the patient suggested also has no slots — apologise and offer the alternate dates from context",
+            context=f"Requested date: {format_date(new_date)}, Nearest available dates: {', '.join(format_date(d) for d in alts)}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
 
     ai_text = await _speak(
         history, doctor_name,
-        situation="patient rejected the date — ask them what date they'd prefer",
+        situation="patient declined or rejected the date — acknowledge it politely and ask what date they would prefer instead",
         context=f"Rejected date: {format_date(chosen_date)}, Doctor: {doctor_name}",
-        fallback=f"No problem! What date would you prefer with {doctor_name}?",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_date", slot_chosen_date=None, slot_chosen_period=None, slot_available_list=None, speech_ai_text=ai_text, slot_selection_history=history)
@@ -276,7 +285,7 @@ async def _handle_ask_alternate_date(state: dict, user_text: str, doctor_name: s
         filtered_dates = available_dates
 
     parsed = await _llm_extract(
-        system=LLM_ALTERNATE_DATE_SYSTEM.format(today=date.today().isoformat(), date_options=build_date_options_text(filtered_dates)),
+        system=LLM_ALTERNATE_DATE_SYSTEM.format(today=_today_ist().isoformat(), date_options=build_date_options_text(filtered_dates)),
         human=user_text,
     )
     chosen_date = _parse_date(parsed.get("date"))
@@ -285,18 +294,16 @@ async def _handle_ask_alternate_date(state: dict, user_text: str, doctor_name: s
     if not date_slots:
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient didn't pick a valid alternate date — list all available dates",
-            context=f"Available dates: {', '.join(format_date(d) for d in filtered_dates)}",
-            fallback=f"No problem. Here are all the dates {doctor_name} is available: {', '.join(format_date(d) for d in filtered_dates)}. Which one would you like?",
+            situation="patient didn't pick a valid alternate date — list all available dates from context and ask them to choose",
+            context=f"All available dates: {', '.join(format_date(d) for d in filtered_dates)}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
 
     ai_text = await _speak(
         history, doctor_name,
-        situation="confirm the alternate date the patient chose",
+        situation="confirm the alternate date the patient just chose",
         context=f"Chosen date: {format_date(chosen_date)}, Doctor: {doctor_name}",
-        fallback=f"Got it — {format_date(chosen_date)}. Just to confirm, you'd like to book with {doctor_name} on that date. Is that correct?",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="confirm_date", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
@@ -318,18 +325,16 @@ async def _proceed_to_period(state: dict, doctor_name: str, chosen_date: date, d
         slot_options = ", ".join(s["display"] for s in period_slots)
         ai_text = await _speak(
             history, doctor_name,
-            situation="only one period available — present the time slots in that period",
-            context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Slots: {slot_options}",
-            fallback=f"{doctor_name} only has {chosen_period} availability on {format_date(chosen_date)}. The open slots are: {slot_options}. Which time works best?",
+            situation="only one time period is available — present the available time slots in that period and ask the patient to pick one",
+            context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Available slots: {slot_options}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_slot", slot_chosen_date=chosen_date, slot_chosen_period=chosen_period, slot_available_list=period_slots, speech_ai_text=ai_text, slot_selection_history=history)
 
     ai_text = await _speak(
         history, doctor_name,
-        situation="multiple periods available — ask patient which part of the day they prefer",
+        situation="multiple time periods are available for the chosen date — ask the patient which part of the day they prefer",
         context=f"Date: {format_date(chosen_date)}, Available periods: {', '.join(period_names)}",
-        fallback=f"{doctor_name} is available in the {', '.join(period_names)} on {format_date(chosen_date)}. Which part of the day works better for you?",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_period", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
@@ -353,9 +358,8 @@ async def _handle_ask_period(state: dict, user_text: str, doctor_name: str, all_
     if chosen_period not in periods:
         ai_text = await _speak(
             history, doctor_name,
-            situation="requested period not available — let patient know and offer what is available",
+            situation="the period the patient requested is not available — inform them and offer only the available periods listed in context",
             context=f"Requested period: {chosen_period or 'unclear'}, Available periods: {', '.join(period_names)}, Date: {format_date(chosen_date)}",
-            fallback=f"Sorry, {doctor_name} isn't available {f'in the {chosen_period} ' if chosen_period else ''}on {format_date(chosen_date)}. Available periods are: {', '.join(period_names)}. Which would you prefer?",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_period", speech_ai_text=ai_text, slot_selection_history=history)
@@ -364,9 +368,8 @@ async def _handle_ask_period(state: dict, user_text: str, doctor_name: str, all_
     slot_options = ", ".join(s["display"] for s in period_slots)
     ai_text = await _speak(
         history, doctor_name,
-        situation="present the available time slots for the chosen period",
-        context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Slots: {slot_options}",
-        fallback=f"Here are the {chosen_period} slots available on {format_date(chosen_date)} with {doctor_name}: {slot_options}. Which time works best?",
+        situation="present the available time slots for the period the patient chose and ask them to pick one",
+        context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Available slots: {slot_options}",
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_slot", slot_chosen_period=chosen_period, slot_available_list=period_slots, speech_ai_text=ai_text, slot_selection_history=history)
@@ -388,9 +391,8 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
         slot_options = ", ".join(s["display"] for s in filtered)
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient wants to change slot — present the other available times",
-            context=f"Date: {format_date(chosen_date)}, Available slots: {slot_options}",
-            fallback=f"Sure! Here are the other available times on {format_date(chosen_date)} with {doctor_name}: {slot_options}. Which one would you like?",
+            situation="patient wants to change their slot — list all other available times from context and ask them to pick",
+            context=f"Date: {format_date(chosen_date)}, Other available slots: {slot_options}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_slot", slot_available_list=filtered, user_change_request=user_change_request, speech_ai_text=ai_text, slot_selection_history=history)
@@ -404,9 +406,8 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
             slot_options = ", ".join(s["display"] for s in filtered)
             ai_text = await _speak(
                 history, doctor_name,
-                situation="no other slots available at all — present what exists on chosen date",
+                situation="no other slots exist at all — present what's available on the chosen date and ask if any works",
                 context=f"Date: {format_date(chosen_date)}, Available slots: {slot_options}",
-                fallback=f"There are no other slots available for {doctor_name} right now. The available times on {format_date(chosen_date)} are: {slot_options}. Would any of these work?",
             )
             history.append({"role": "assistant", "content": ai_text})
             return update_state(state, slot_stage="ask_slot", slot_available_list=filtered, speech_ai_text=ai_text, slot_selection_history=history)
@@ -416,9 +417,8 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
         alt_options = ", ".join(s["full_display"] for s in alt_slots)
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient didn't pick a slot — offer alternative slots on nearby dates",
-            context=f"Alternate slots: {alt_options}",
-            fallback=f"No problem! Here are some alternative slots for {doctor_name}: {alt_options}. Would any of these work?",
+            situation="patient didn't pick a slot — offer the alternative slots on nearby dates listed in context",
+            context=f"Alternative slots: {alt_options}",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_slot", slot_available_list=alt_slots, speech_ai_text=ai_text, slot_selection_history=history)
@@ -442,9 +442,8 @@ async def _handle_ask_alternate_slot(state: dict, user_text: str, doctor_name: s
     if not slot_id:
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient rejected all alternate slots — ask them what date they'd prefer instead",
+            situation="patient rejected all alternate slots — apologise and ask what date would work best for them instead",
             context=f"Doctor: {doctor_name}",
-            fallback=f"No worries! Let's try again — what date works best for you with {doctor_name}?",
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_date", slot_chosen_date=None, slot_chosen_period=None, slot_available_list=None, speech_ai_text=ai_text, slot_selection_history=history)

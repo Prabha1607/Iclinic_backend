@@ -3,60 +3,96 @@ from src.config.settings import settings
 from langchain_groq import ChatGroq
 from langchain_core.embeddings import Embeddings
 from sentence_transformers import SentenceTransformer
-from typing import List
-import itertools
-from dotenv import load_dotenv 
+from typing import AsyncGenerator, List
+from dotenv import load_dotenv
+
 load_dotenv()
 
 API_KEYS = settings.groq_keys_list
 
-key_cycle = itertools.cycle(API_KEYS)
+current_key_index = 0
 
-def get_llama3(api_key : str):
+
+def get_llama3(api_key: str):
     return ChatGroq(
         model="llama-3.3-70b-versatile",
-        temperature=0.2,     
-        max_tokens=150,
-        api_key = api_key
+        temperature=0.2,
+        max_tokens=100,
+        api_key=api_key
     )
+
 
 def get_llama1():
     return ChatGroq(
         model="llama-3.1-8b-instant",
-        temperature=0.2,     
-        max_tokens=150,
-        api_key = API_KEYS[1]
+        temperature=0.2,
+        max_tokens=100,
+        api_key=API_KEYS[0]
     )
 
+
 async def ainvoke_llm(messages):
+    
+    global current_key_index
+
+    attempts = 0
     last_error = None
 
-    for _ in range(len(API_KEYS)):
-        api_key = next(key_cycle)
+    while attempts < len(API_KEYS):
+        api_key = API_KEYS[current_key_index]
+
         try:
-            return await get_llama3(api_key).ainvoke(messages)
+            response = await get_llama3(api_key).ainvoke(messages)
+            return response
+
         except Exception as e:
             last_error = e
-            continue
+
+            # move to next key
+            current_key_index = (current_key_index + 1) % len(API_KEYS)
+            attempts += 1
 
     raise RuntimeError(f"All Groq API keys failed: {last_error}")
 
-class SentenceTransformerEmbeddings(Embeddings):
+
+async def astream_llm(messages) -> AsyncGenerator[str, None]:
     
+    global current_key_index
+
+    attempts = 0
+    last_error = None
+
+    while attempts < len(API_KEYS):
+        api_key = API_KEYS[current_key_index]
+        try:
+            async for chunk in get_llama3(api_key).astream(messages):
+               
+                if chunk.content:
+                    yield chunk.content
+            return  
+        except Exception as e:
+            last_error = e
+            current_key_index = (current_key_index + 1) % len(API_KEYS)
+            attempts += 1
+
+    raise RuntimeError(f"All Groq API keys failed during streaming: {last_error}")
+
+
+
+
+class SentenceTransformerEmbeddings(Embeddings):
+
     def __init__(self, model_name: str = "BAAI/bge-base-en-v1.5"):
         self.model = SentenceTransformer(model_name)
-    
+
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        
-        # Embed a list of documents.
         embeddings = self.model.encode(texts, convert_to_numpy=True)
         return embeddings.tolist()
-    
+
     def embed_query(self, text: str) -> List[float]:
-        
-        # Embed a single query.
         embedding = self.model.encode(text, convert_to_numpy=True)
         return embedding.tolist()
+
 
 def get_embedding_model():
     return SentenceTransformerEmbeddings(

@@ -3,12 +3,12 @@ from fastapi import HTTPException
 from sqlalchemy import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.schemas.user import UserCreate, UserUpdate
-from src.data.repositories.users import create_patient_repo, get_all_providers, get_patients, get_providers_by_type_repo, update_user_with_profile_repo
+from src.data.repositories.users import insert_user,insert_patient_profile, get_all_providers, get_patients, get_providers_by_type_repo, update_user_with_profile_repo
 from src.config.hashing import get_password_hash
 from src.utils.to_uuid import to_uuid
 from src.data.models.postgres.refresh_token import RefreshToken
 from src.data.repositories.common_commit import commit_transaction
-from src.data.repositories.generic_crud import get_instance_by_any, get_instance_by_id, insert_instance , bulk_get_instance
+from src.data.repositories.generic_crud import get_instance_by_any, commit_transaction, get_instance_by_id, insert_instance , bulk_get_instance
 from src.data.models.postgres.role import Role
 from src.data.models.postgres.user import User
 from datetime import date
@@ -17,23 +17,34 @@ from datetime import date
 def is_email(value: str) -> bool:
     return "@" in value
 
-async def create_user(db: AsyncSession, user_data):
+async def create_user(db: AsyncSession, user_data: UserCreate):
     try:
         hashed_password = get_password_hash(user_data.password)
 
         user_dict = user_data.model_dump(exclude={"patient_profile"})
         user_dict["password"] = hashed_password
 
-        await insert_instance(db=db, model=User, **user_dict)
+        user_id = await insert_user(db, user_dict)
 
         if user_data.patient_profile:
-            pass
+            profile_data = user_data.patient_profile.model_dump()
 
-    except HTTPException:
-        raise
-    except Exception:
-        raise Exception("User creation failed")
+            await insert_patient_profile(
+                db,
+                user_id,
+                profile_data
+            )
 
+        await db.commit()
+        user = await get_instance_by_id(db=db,model=User,id=user_id)
+
+        return user
+
+
+    except Exception as e:
+        await db.rollback()
+        raise e
+       
 async def get_user_by_email(email : str , db : AsyncSession):
 
     try:
@@ -181,26 +192,6 @@ async def get_providers_by_type_service(
         appointment_type_id=appointment_type_id,
         is_active=is_active
     )
-
-async def create_patient_service(
-    db: AsyncSession,
-    patient_data: UserCreate
-):
-    data = patient_data.model_dump()
-
-    profile_data = data.pop("patient_profile", None) or {}   
-
-    data["password"] = get_password_hash(data["password"])
-
-    patient = await create_patient_repo(
-        db=db,
-        user_data=data,
-        profile_data=profile_data
-    )
-
-    return patient
-
-
 
 async def update_user_service(
     db: AsyncSession,

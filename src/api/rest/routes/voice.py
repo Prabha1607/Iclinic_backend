@@ -30,6 +30,7 @@ def _build_appointment_types(appointment_types: list) -> dict:
 def _is_call_complete(result: dict) -> bool:
     identity_confirmation_completed = result.get("identity_confirmation_completed", False)
     identity_confirmed_user         = result.get("identity_confirmed_user", False)
+    
     return (
         (identity_confirmation_completed and not identity_confirmed_user)
         or result.get("slot_booked_id") is not None
@@ -136,7 +137,13 @@ async def voice_response(request: Request):
         )
 
     try:
-        result = await response_graph.ainvoke(state)
+        result = dict(state)
+
+        async for chunk in response_graph.astream(state):
+            for node_output in chunk.values():
+                if isinstance(node_output, dict):
+                    result.update(node_output)
+
     except Exception as e:
         logger.error("Response graph failed", extra={"call_sid": call_sid, "error": str(e)})
         result = {**state, "speech_ai_text": FALLBACK_TEXT}
