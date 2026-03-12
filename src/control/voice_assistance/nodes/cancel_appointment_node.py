@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import astream_llm, get_llama1
 from src.control.voice_assistance.utils import update_state
 from src.data.repositories.generic_crud import update_instance
 from src.control.voice_assistance.prompts.cancel_appointment_node_prompt import (
@@ -26,10 +26,15 @@ async def _cancel_appointment_in_db(appointment_id: int) -> None:
 
 
 async def _llm_invoke(system: str, human: str) -> str:
-    model = get_llama1()
-    response = await model.ainvoke([("system", system), ("human", human)])
-    return response.content.strip()
+    chunks = []
 
+    async for chunk in astream_llm([
+        ("system", system),
+        ("human", human)
+    ]):
+        chunks.append(chunk)
+
+    return "".join(chunks).strip()
 
 def _parse_decision(raw: str) -> str:
     

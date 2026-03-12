@@ -1,5 +1,5 @@
 import json
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import astream_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 
 
@@ -70,26 +70,31 @@ def _build_snapshot(state: dict) -> dict:
 
 
 async def _generate_confirmation_message(snapshot: dict) -> str:
-    llm = get_llama1()
-    response = await llm.ainvoke([
+    chunks = []
+
+    async for chunk in astream_llm([
         ("system", PRE_CONFIRMATION_SYSTEM_PROMPT),
         ("human", f"Booking details:\n{json.dumps(snapshot, default=str, indent=2)}")
-    ])
-    return response.content.strip()
+    ]):
+        chunks.append(chunk)
 
+    return "".join(chunks).strip()
 
 async def _detect_user_intent(user_text: str) -> tuple[bool, bool]:
-    llm = get_llama1()
     try:
-        response = await llm.ainvoke([
+        chunks = []
+
+        async for chunk in astream_llm([
             ("system", INTENT_DETECTION_SYSTEM_PROMPT),
-            ("human", f"Patient reply: \"{user_text}\"")
-        ])
-        parsed = json.loads(clear_markdown(response.content.strip()))
+            ("human", f'Patient reply: "{user_text}"')
+        ]):
+            chunks.append(chunk)
+
+        parsed = json.loads(clear_markdown("".join(chunks).strip()))
         return bool(parsed.get("confirmed")), bool(parsed.get("uncertain"))
+
     except Exception:
         return False, True
-
 
 
 async def pre_confirmation_node(state: dict) -> dict:

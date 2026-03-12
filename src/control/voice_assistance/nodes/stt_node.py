@@ -1,7 +1,7 @@
 import json
 from typing import Any
 from src.control.voice_assistance.prompts.stt_node_prompt import STT_INTENT_SYSTEM
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import astream_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown
 
 
@@ -87,15 +87,18 @@ def _reset_from_slot(state: dict, user_text: str) -> dict:
 
 async def _detect_change_intent(user_text: str) -> str:
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
+        chunks = []
+
+        async for chunk in astream_llm([
             ("system", STT_INTENT_SYSTEM),
             ("human", user_text),
-        ])
-        raw = response.content.strip()
+        ]):
+            chunks.append(chunk)
+
+        raw = "".join(chunks).strip()
         parsed = json.loads(clear_markdown(raw))
         return parsed.get("intent", "none")
-    
+
     except Exception as e:
         print(f"[stt_node] intent detection failed: {e}")
         return "none"

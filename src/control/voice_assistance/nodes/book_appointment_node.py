@@ -9,7 +9,7 @@ from src.control.voice_assistance.prompts.book_appointment_node_prompt import (
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus, BookingChannel, SlotStatus
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import astream_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 
 
@@ -39,12 +39,15 @@ async def extract_appointment_context(conversation_history: list | str) -> dict:
     history_text = _build_history_text(conversation_history)
 
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
+        full_response = ""
+
+        async for chunk in astream_llm([
             ("system", EXTRACT_CONTEXT_PROMPT),
             ("human", f"Conversation:\n{history_text}")
-        ])
-        parsed = json.loads(clear_markdown(response.content.strip()))
+        ]):
+            full_response += chunk
+
+        parsed = json.loads(clear_markdown(full_response.strip()))
         return parsed
 
     except Exception:

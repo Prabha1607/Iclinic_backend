@@ -56,6 +56,22 @@ async def ainvoke_llm(messages):
 
 
 async def astream_llm(messages) -> AsyncGenerator[str, None]:
+    try:
+        async for chunk in ChatGroq(
+            model="llama-3.1-8b-instant",
+            temperature=0.2,
+            max_tokens=100,
+            api_key=API_KEYS[0]
+        ).astream(messages):
+
+            if chunk.content:
+                yield chunk.content
+
+    except Exception as e:
+        raise RuntimeError(f"Groq streaming failed: {e}")
+
+
+async def astream_llm1(messages) -> AsyncGenerator[str, None]:
     
     global current_key_index
 

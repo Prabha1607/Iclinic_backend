@@ -1,7 +1,7 @@
 import json
 from src.control.voice_assistance.utils import clear_markdown, update_state
 from src.control.voice_assistance.prompts.mapping_node_prompt import SYSTEM_PROMPT, EMERGENCY_RESPONSE, CLASSIFIER_SYSTEM_PROMPT, DEFAULT_INTENT
-from src.control.voice_assistance.models import get_llama1
+from src.control.voice_assistance.models import astream_llm, get_llama1
 
 
 def _normalise(text: str) -> str:
@@ -44,21 +44,22 @@ that best matches the intent. If nothing matches, use the ID for general check-u
 Example: {{"appointment_type_id": 3}}"""
 
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
+        chunks = []
+
+        async for chunk in astream_llm([
             ("system", CLASSIFIER_SYSTEM_PROMPT),
             ("human", prompt),
-        ])
-        clean = clear_markdown(response.content.strip())
+        ]):
+            chunks.append(chunk)
+
+        clean = clear_markdown("".join(chunks).strip())
         parsed = json.loads(clean)
         return int(parsed.get("appointment_type_id"))
 
     except (json.JSONDecodeError, TypeError, ValueError):
         return _fallback_appointment_type_id(appointment_types)
     except Exception as e:
-
         return _fallback_appointment_type_id(appointment_types)
-
 
 async def _classify_intent(conversation_transcript: str, appointment_types: dict) -> str:
     prompt = f"""Appointment type catalogue:
@@ -71,23 +72,25 @@ Based on the full conversation above, classify the patient into the most appropr
 Return JSON with key "intent" only."""
 
     try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
+        chunks = []
+
+        async for chunk in astream_llm([
             ("system", SYSTEM_PROMPT),
             ("human", prompt),
-        ])
-        clean = clear_markdown(response.content.strip())
+        ]):
+            chunks.append(chunk)
+
+        clean = clear_markdown("".join(chunks).strip())
         parsed = json.loads(clean)
         intent = str(parsed.get("intent", DEFAULT_INTENT)).strip().lower()
+
     except (json.JSONDecodeError, AttributeError, KeyError):
         return DEFAULT_INTENT
     except Exception as e:
-
         return DEFAULT_INTENT
 
     valid_intents = [_normalise(name) for _, (name, _) in appointment_types.items()]
     return intent if intent in valid_intents else DEFAULT_INTENT
-
 
 async def mapping_node(state: dict) -> dict:
     print("[mapping_node] -----------------------------")

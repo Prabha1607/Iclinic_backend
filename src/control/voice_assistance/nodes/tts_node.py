@@ -11,3 +11,5 @@ async def tts_node(state: dict) -> dict:
     ai_text = ai_text.replace("*", "").replace("#", "").strip()
 
     return {**state, "speech_ai_text": ai_text}
+
+
