@@ -1,41 +1,62 @@
-# import asyncio
-# asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+import asyncio
+import sys
 
-# from src.control.voice_assistance.utils import fresh_state
-# from src.control.voice_assistance.graph import build_response_graph
+# Windows compatibility (ignored on Linux)
+if sys.platform.startswith("win"):
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
-# response_graph = build_response_graph()
+from src.control.voice_assistance.utils import fresh_state
+from src.control.voice_assistance.graph import build_response_graph
 
-# async def chat_loop():
-#     state = fresh_state(to_number="debug", call_sid="debug123")
-
-#     while True:
-#         user_input = input("User: ")
-
-#         if user_input.lower() in ["exit", "quit"]:
-#             break
-
-#         state["user_text"] = user_input
-#         result = await response_graph.ainvoke(state)
-
-#         print("AI:", result.get("ai_text"))
-#         state = result
-
-# asyncio.run(chat_loop())
+response_graph = build_response_graph()
 
 
+async def chat_loop():
+    # initialize state using your schema
+    state = fresh_state()
+
+    state = fresh_state()
+
+    state["call_to_number"] = "debug"
+    state["call_sid"] = "debug123"
+    state["identity_user_name"] = "prabha"
+    state["identity_user_phone"] = "9524650818"
+    state["identity_user_email"] = "prabhamuruganantham06@gmail.com"
+
+    while True:
+        user_input = input("User: ")
+
+        if user_input.lower() in ["exit", "quit"]:
+            break
+
+        # schema requires speech_user_text
+        state["speech_user_text"] = user_input
+
+        result = await response_graph.ainvoke(state)
+
+        ai_text = result.get("speech_ai_text")
+        print("AI:", ai_text)
+
+        # update state for next turn
+        state = result
+
+
+if __name__ == "__main__":
+    asyncio.run(chat_loop())
 
 
 
-from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
-def get_password_hash(password: str):
-    return pwd_context.hash(password)
+# from passlib.context import CryptContext
 
-password = "Saravanan@012"
+# pwd_context = CryptContext(schemes=["argon2"], deprecated="auto")
 
-hashed_password = get_password_hash(password)
+# def get_password_hash(password: str):
+#     return pwd_context.hash(password)
 
-print(hashed_password)
+# password = "Saravanan@012"
+
+# hashed_password = get_password_hash(password)
+
+# print(hashed_password)

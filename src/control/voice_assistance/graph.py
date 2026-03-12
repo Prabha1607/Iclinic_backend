@@ -92,7 +92,7 @@ def build_response_graph():
     workflow.add_conditional_edges(
         "clarify",
         route_after_clarify,
-        {"tts": "tts", "doctor_selection": "doctor_selection"},  # ✅ mapping removed
+        {"tts": "tts", "doctor_selection": "doctor_selection"},  
     )
 
     # ✅ mapping → doctor_selection edge removed

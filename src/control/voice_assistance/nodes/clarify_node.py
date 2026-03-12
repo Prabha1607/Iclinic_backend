@@ -1,169 +1,162 @@
 import asyncio
 import json
-from src.control.voice_assistance.models import astream_llm, get_llama1
+
 from src.control.voice_assistance.prompts.clarify_node_prompt import (
     CLARIFY_SYSTEM_PROMPT,
-    COVERAGE_CHECK_SYSTEM_PROMPT,
-    COVERAGE_CHECK_HUMAN_TEMPLATE,
-    EMERGENCY_SYSTEM_PROMPT,
     EMERGENCY_RESPONSE,
     FALLBACK_RESPONSE,
     TOPICS,
 )
 from src.control.voice_assistance.utils import (
-    is_emergency,
+    ainvoke_llm_json,
+    build_catalogue_lines,
+    build_conversation_string,
+    collect_stream,
+    fallback_appointment_type,
+    llm1_invoke_text,
     update_state,
 )
-from src.control.voice_assistance.utils import clear_markdown
+
+_TRIAGE_AND_COVERAGE_SYSTEM_PROMPT = """
+You are a medical intake assistant doing two things at once.
+
+TASK 1 — Emergency check
+Decide whether the patient's latest message describes an ACTIVE, life-threatening emergency:
+chest pain, heart attack, stroke, cannot breathe, severe bleeding, unconscious, seizure,
+severe allergic reaction, suspected poisoning.
+Anything else (mild/chronic symptoms, confusion, vague replies, noise) → NOT an emergency.
+When in doubt: NOT an emergency.
+
+TASK 2 — Coverage check
+Read the FULL conversation and decide which of the four intake topics the PATIENT has
+clearly and explicitly answered (not just been asked about).
+
+Topic definitions:
+1. main symptom or complaint — PASS if patient names something specific ("headache", "fever", "knee pain");
+   FAIL if vague ("not feeling well", "I'm sick")
+2. when it started / duration — PASS if any time reference given ("since yesterday", "3 days ago");
+   FAIL if no time mentioned
+3. patient age in years — PASS if a specific number given ("I'm 34", "born in 1990");
+   FAIL if vague ("young", "child", "elderly")
+4. existing medical conditions or allergies — PASS if specific condition/allergy named OR explicit denial
+   ("no allergies", "I'm healthy", "none"); FAIL if not mentioned at all
+
+Return ONLY valid JSON — no markdown, no explanation:
+{
+  "emergency": true | false,
+  "covered_indices": [<1-based topic numbers the patient has clearly answered>]
+}
+
+Examples:
+  All topics answered, no emergency → {"emergency": false, "covered_indices": [1, 2, 3, 4]}
+  Only symptom answered             → {"emergency": false, "covered_indices": [1]}
+  Nothing answered yet              → {"emergency": false, "covered_indices": []}
+  Emergency detected                → {"emergency": true,  "covered_indices": [1]}
+""".strip()
 
 
-_MAPPING_SYSTEM_PROMPT = """
+_MAP_AND_REASON_SYSTEM_PROMPT = """
 You are a medical appointment classification assistant.
 
-You will receive a completed intake conversation between a clinic assistant and a patient (or their proxy).
-Your job is to read the full conversation and decide the single most appropriate appointment type.
+You will receive a completed intake conversation and a catalogue of appointment types.
 
-Rules:
-- Read the ENTIRE conversation to understand the patient's age, symptoms, duration, severity, and conditions.
-- Choose the most specific appointment type that fits the primary complaint.
-- If the patient is under 18, prefer "pediatric" unless a clearly more specific specialist is needed.
-- Only return "emergency" if the situation is IMMEDIATELY life-threatening right now
-  (e.g. unconscious, cannot breathe, active stroke or heart attack).
-  A high fever, pain, or chronic illness is NOT an emergency — book the right specialist instead.
-- If the symptom is common and non-specific (fever, cold, fatigue, general pain), return "general_checkup".
-- If no specific type fits clearly, return "general_checkup".
+Your two tasks:
+1. Choose the single most appropriate appointment type from the catalogue.
+   Rules:
+   - Read the ENTIRE conversation (age, symptoms, duration, severity, conditions).
+   - Prefer the most specific type that fits the primary complaint.
+   - If the patient is under 18, prefer "pediatric" unless a clearly more specific specialist applies.
+   - Only classify as "emergency" if the situation is IMMEDIATELY life-threatening RIGHT NOW
+     (unconscious, cannot breathe, active stroke/heart attack). Fever, pain, chronic illness → NOT emergency.
+   - If the symptom is common/non-specific (fever, cold, fatigue, general pain) → "general_checkup".
+   - If nothing fits clearly → "general_checkup".
 
-You will also receive a catalogue of available appointment types with their IDs.
-Return ONLY a JSON object in this exact format — no other text:
+2. Write a short clinical reason for the visit (1–2 sentences, plain English).
+   Example: "Patient reports persistent lower back pain for 3 days with no prior injury."
+   Do NOT include the patient name, appointment type name, or any JSON in the reason.
+
+Return ONLY valid JSON — no markdown, no extra text:
 {
   "appointment_type_id": <int>,
   "intent": "<lowercase_appointment_type_name>",
-  "reasoning": "<one concise sentence>"
+  "reason_for_visit": "<1–2 sentence clinical note>"
 }
 """.strip()
 
 
-_REASON_SYSTEM_PROMPT = """
-You are a medical intake assistant.
-Read the conversation and write a short, clear reason for the patient's visit in plain English.
-- 1–2 sentences max.
-- Write it as a clinical note, e.g. "Patient reports persistent lower back pain for 3 days with no prior injury."
-- Do NOT include patient name, appointment type, or any JSON — just the plain reason text.
-""".strip()
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
+async def _triage_and_check_coverage(
+    user_text: str,
+    history: list[dict],
+    topics: list[str],
+) -> tuple[bool, list[str]]:
+    conversation = build_conversation_string(history)
+    topics_numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(topics))
 
-def _build_catalogue_lines(appointment_types: dict) -> str:
-    return "\n".join(
-        f"  id={type_id}, name={name}, description={description}"
-        for type_id, (name, description) in appointment_types.items()
-    )
-
-
-def _fallback_type(appointment_types: dict) -> tuple[int, str]:
-    for type_id, (name, _) in appointment_types.items():
-        if "general" in name.lower():
-            return type_id, name.strip().lower().replace(" ", "_")
-    first_id = next(iter(appointment_types))
-    return first_id, appointment_types[first_id][0].strip().lower().replace(" ", "_")
-
-
-async def _map_appointment(conversation_str: str, appointment_types: dict) -> tuple[int, str]:
-    catalogue = _build_catalogue_lines(appointment_types)
-    try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
-            ("system", _MAPPING_SYSTEM_PROMPT),
-            ("human", f"Available appointment types:\n{catalogue}\n\nFull intake conversation:\n{conversation_str}"),
-        ])
-        parsed = json.loads(clear_markdown(response.content.strip()))
-        appointment_type_id = int(parsed.get("appointment_type_id"))
-        intent = str(parsed.get("intent", "")).strip().lower()
-        reasoning = parsed.get("reasoning", "")
-        print(f"[_map_appointment] reasoning: {reasoning}")
-        return appointment_type_id, intent
-    except Exception as e:
-        print("[_map_appointment error]:", e)
-        return _fallback_type(appointment_types)
-
-
-async def _extract_reason(conversation_str: str) -> str:
-    try:
-        llm = get_llama1()
-        response = await llm.ainvoke([
-            ("system", _REASON_SYSTEM_PROMPT),
-            ("human", f"Conversation:\n{conversation_str}"),
-        ])
-        return response.content.strip().strip('"').strip("'")
-    except Exception as e:
-        print("[_extract_reason error]:", e)
-        return ""
-
-
-async def _collect(messages: list) -> str:
-    full_content = ""
-    async for token in astream_llm(messages):
-        full_content += token
-    return full_content
-
-
-async def get_covered_topics(history: list[dict], topics: list[str]) -> list[str]:
-    unchecked_numbered = "\n".join(f"{i+1}. {t}" for i, t in enumerate(topics))
-    conversation = _build_conversation_string(history)
-
-    prompt = COVERAGE_CHECK_HUMAN_TEMPLATE.format(
-        conversation=conversation,
-        topics_numbered=unchecked_numbered,
+    prompt = (
+        f"Patient's latest message: {user_text}\n\n"
+        f"Full conversation so far:\n{conversation}\n\n"
+        f"Topics to check:\n{topics_numbered}"
     )
 
     try:
-        model = get_llama1()
-        response = await model.ainvoke([
-            ("system", COVERAGE_CHECK_SYSTEM_PROMPT),
+        raw = await llm1_invoke_text([
+            ("system", _TRIAGE_AND_COVERAGE_SYSTEM_PROMPT),
             ("human", prompt),
         ])
 
-        raw = response.content.strip().upper()
-        print("[coverage_check raw]:", raw)
+        clean = raw.strip()
+        if clean.startswith("```"):
+            clean = "\n".join(l for l in clean.splitlines() if "```" not in l).strip()
 
-        if not raw or raw == "NONE":
-            return []
-
-        return [
-            topics[int(n.strip()) - 1]
-            for n in raw.split(",")
-            if n.strip().isdigit() and 0 <= int(n.strip()) - 1 < len(topics)
+        data = json.loads(clean)
+        is_emerg = bool(data.get("emergency", False))
+        indices  = data.get("covered_indices", [])
+        covered  = [
+            topics[int(i) - 1]
+            for i in indices
+            if str(i).strip().isdigit() and 0 <= int(i) - 1 < len(topics)
         ]
+        return is_emerg, covered
 
     except Exception as exc:
-        print("[get_covered_topics error]:", exc)
-        return []
+        print("[_triage_and_check_coverage error]:", exc)
+        return False, []
 
 
-def _build_conversation_string(history: list[dict]) -> str:
-    role_map = {"user": "Patient", "assistant": "Agent"}
-    return "\n".join(
-        f"{role_map.get(turn['role'], turn['role'].capitalize())}: {turn['content']}"
-        for turn in history
-    )
+async def _map_and_extract(
+    conversation_str: str,
+    appointment_types: dict,
+) -> tuple[int, str, str]:
+    catalogue = build_catalogue_lines(appointment_types)
+    try:
+        data = await ainvoke_llm_json([
+            ("system", _MAP_AND_REASON_SYSTEM_PROMPT),
+            (
+                "human",
+                f"Appointment type catalogue:\n{catalogue}\n\n"
+                f"Full intake conversation:\n{conversation_str}",
+            ),
+        ])
+        appointment_type_id = int(data.get("appointment_type_id"))
+        intent           = str(data.get("intent", "")).strip().lower()
+        reason_for_visit = str(data.get("reason_for_visit", "")).strip()
+        print(f"[_map_and_extract] intent={intent}, type_id={appointment_type_id}")
+        print(f"[_map_and_extract] reason_for_visit={reason_for_visit}")
+        return appointment_type_id, intent, reason_for_visit
+    except Exception as e:
+        print("[_map_and_extract error]:", e)
+        fb_id, fb_intent = fallback_appointment_type(appointment_types)
+        return fb_id, fb_intent, ""
 
 
 def _build_greeting(user_name: str | None) -> str:
     name_part = f", {user_name}" if user_name else ""
-    return f"Hi{name_part}! Thanks for confirming — I just need to ask you a few quick questions before we get you booked in. "
-
-
-async def _refresh_covered_topics(history: list[dict], covered: list[str]) -> list[str]:
-    unchecked = [t for t in TOPICS if t not in covered]
-    if not unchecked:
-        return covered
-
-    newly_covered = await get_covered_topics(history, unchecked)
-
-    result = list(covered)
-    for t in TOPICS:
-        if t in newly_covered and t not in result:
-            result.append(t)
-    return result
+    return (
+        f"Hi{name_part}! Thanks for confirming — "
+        f"I just need to ask you a few quick questions before we get you booked in. "
+    )
 
 
 def _build_clarify_messages(history: list[dict], uncovered: list[str]) -> list[dict]:
@@ -180,25 +173,50 @@ def _build_clarify_messages(history: list[dict], uncovered: list[str]) -> list[d
     ]
 
 
-# ─── Main node ────────────────────────────────────────────────────────────────
-
 async def clarify_node(state: dict) -> dict:
     print("[clarify_node] -----------------------------")
     try:
-        history: list[dict] = list(state.get("clarify_conversation_history") or [])
-        user_text: str | None = state.get("speech_user_text")
-        covered: list[str] = list(state.get("clarify_covered_topics") or [])
-        user_name: str | None = state.get("identity_user_name")
+        history: list[dict]     = list(state.get("clarify_conversation_history") or [])
+        user_text: str | None   = state.get("speech_user_text")
+        covered: list[str]      = list(state.get("clarify_covered_topics") or [])
+        user_name: str | None   = state.get("identity_user_name")
         appointment_types: dict = state.get("appointment_types") or {}
 
         is_first_turn = len(history) == 0
 
-        if user_text:
+        
+        identity_just_confirmed = state.get("identity_confirmation_completed") and is_first_turn
+
+        is_emerg   = False
+        full_content = ""
+
+        if user_text and not identity_just_confirmed:
             user_text = user_text.strip()
             history.append({"role": "user", "content": user_text})
-            print("[user_response]:", user_text)
 
-            if await is_emergency(user_text, get_llama=get_llama1, system_prompt=EMERGENCY_SYSTEM_PROMPT):
+            uncovered_before = [t for t in TOPICS if t not in covered]
+
+            clarify_messages = (
+                _build_clarify_messages(history, uncovered_before)
+                if uncovered_before else None
+            )
+
+            if clarify_messages:
+                (is_emerg, newly_covered), full_content = await asyncio.gather(
+                    _triage_and_check_coverage(user_text, history, TOPICS),
+                    collect_stream(clarify_messages),
+                )
+            else:
+                is_emerg, newly_covered = await _triage_and_check_coverage(user_text, history, TOPICS)
+                full_content = ""
+
+            for t in TOPICS:
+                if t in newly_covered and t not in covered:
+                    covered.append(t)
+
+            print("[covered_topics]:", covered)
+
+            if is_emerg:
                 return update_state(
                     state,
                     speech_ai_text=EMERGENCY_RESPONSE,
@@ -208,43 +226,22 @@ async def clarify_node(state: dict) -> dict:
                     clarify_covered_topics=covered,
                 )
 
-            uncovered_optimistic = [t for t in TOPICS if t not in covered]
-            messages = _build_clarify_messages(history, uncovered_optimistic) if uncovered_optimistic else None
-
-            if messages:
-                covered, full_content = await asyncio.gather(
-                    _refresh_covered_topics(history, covered),
-                    _collect(messages),
-                )
-            else:
-                covered = await _refresh_covered_topics(history, covered)
-                full_content = ""
-
-            print("[covered_topics]:", covered)
-
-        else:
-            full_content = ""
-
         uncovered = [t for t in TOPICS if t not in covered]
         print("[uncovered_topics]:", uncovered)
 
         if not uncovered:
-            conversation_str = _build_conversation_string(history)
-
-            appointment_type_id, intent = _fallback_type(appointment_types)
-            reason_for_visit = ""
+            conversation_str    = build_conversation_string(history)
+            fb_id, fb_intent    = fallback_appointment_type(appointment_types)
+            appointment_type_id = fb_id
+            intent              = fb_intent
+            reason_for_visit    = ""
 
             if appointment_types:
                 try:
-                    (appointment_type_id, intent), reason_for_visit = await asyncio.wait_for(
-                        asyncio.gather(
-                            _map_appointment(conversation_str, appointment_types),
-                            _extract_reason(conversation_str),
-                        ),
-                        timeout=4.0,
+                    appointment_type_id, intent, reason_for_visit = await asyncio.wait_for(
+                        _map_and_extract(conversation_str, appointment_types),
+                        timeout=5.0,
                     )
-                    print("[mapped] intent:", intent, "| type_id:", appointment_type_id)
-                    print("[reason_for_visit]:", reason_for_visit)
                 except asyncio.TimeoutError:
                     print("[mapping] timed out — using fallback")
                 except Exception as e:
@@ -255,7 +252,6 @@ async def clarify_node(state: dict) -> dict:
                 f"Thank you for sharing that! I'll go ahead and look into booking "
                 f"a {friendly_name} appointment for you now."
             )
-
             return update_state(
                 state,
                 clarify_conversation_history=history,
@@ -268,13 +264,16 @@ async def clarify_node(state: dict) -> dict:
                 speech_ai_text=bridge_text,
             )
 
+        # FIX 3: if full_content was already streamed above, use it;
+        # otherwise generate now (covers identity_just_confirmed path too)
         if not full_content:
-            messages = _build_clarify_messages(history, uncovered)
-            full_content = await _collect(messages)
+            messages     = _build_clarify_messages(history, uncovered)
+            full_content = await collect_stream(messages)
 
         ai_text = full_content.strip().strip('"').strip("'")
         print("[ai_response]:", ai_text)
 
+        # FIX 1 (cont): is_first_turn is now always defined, prepend greeting
         if is_first_turn:
             ai_text = _build_greeting(user_name) + ai_text
 
@@ -296,5 +295,4 @@ async def clarify_node(state: dict) -> dict:
             clarify_completed=True,
             speech_error=str(exc),
         )
-    
     

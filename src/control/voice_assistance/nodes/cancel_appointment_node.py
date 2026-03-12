@@ -3,14 +3,14 @@ from datetime import datetime, timezone
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus
-from src.control.voice_assistance.models import astream_llm, get_llama1
-from src.control.voice_assistance.utils import update_state
 from src.data.repositories.generic_crud import update_instance
 from src.control.voice_assistance.prompts.cancel_appointment_node_prompt import (
+    CANCEL_ERROR_RESPONSE,
     CONFIRM_PROMPT,
     ERROR_RESPONSE,
-    CANCEL_ERROR_RESPONSE,
 )
+from src.control.voice_assistance.utils import llm_invoke_raw, update_state
+
 
 async def _cancel_appointment_in_db(appointment_id: int) -> None:
     async with AsyncSessionLocal() as session:
@@ -25,23 +25,10 @@ async def _cancel_appointment_in_db(appointment_id: int) -> None:
         )
 
 
-async def _llm_invoke(system: str, human: str) -> str:
-    chunks = []
-
-    async for chunk in astream_llm([
-        ("system", system),
-        ("human", human)
-    ]):
-        chunks.append(chunk)
-
-    return "".join(chunks).strip()
-
 def _parse_decision(raw: str) -> str:
-    
     first_word = raw.strip().split()[0].upper().rstrip(".,;:")
-    if first_word == "YES":
-        return "YES"
-    return "NO"
+    return "YES" if first_word == "YES" else "NO"
+
 
 async def _handle_ask_confirm(state: dict, user_text: str) -> dict:
     appointment_data = state.get("cancellation_appointment")
@@ -53,7 +40,7 @@ async def _handle_ask_confirm(state: dict, user_text: str) -> dict:
         )
 
     try:
-        raw_decision = await _llm_invoke(
+        raw_decision = await llm_invoke_raw(
             system=CONFIRM_PROMPT.format(
                 date=appointment_data["date"],
                 start_time=appointment_data["start_time"],

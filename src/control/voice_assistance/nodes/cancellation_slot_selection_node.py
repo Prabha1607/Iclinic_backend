@@ -6,15 +6,15 @@ from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.appointment_type import AppointmentType
 from src.data.models.postgres.ENUM import AppointmentStatus
-from src.control.voice_assistance.models import astream_llm, get_llama1
-from src.control.voice_assistance.utils import update_state
 from src.control.voice_assistance.prompts.cancel_appointment_node_prompt import (
-    SELECT_SLOT_PROMPT,
-    SELECT_DATE_PROMPT,
-    ERROR_RESPONSE,
     DB_ERROR_RESPONSE,
+    ERROR_RESPONSE,
     NO_APPOINTMENTS_RESPONSE,
+    SELECT_DATE_PROMPT,
+    SELECT_SLOT_PROMPT,
 )
+from src.control.voice_assistance.utils import llm_invoke_raw, update_state
+
 
 async def _fetch_upcoming_appointments(user_id: int) -> list:
     now = datetime.now(timezone.utc)
@@ -42,18 +42,6 @@ async def _fetch_upcoming_appointments(user_id: int) -> list:
             row[0].scheduled_start_time,
         ).replace(tzinfo=timezone.utc) > now
     ]
-
-
-async def _llm_invoke(system: str, human: str) -> str:
-    chunks = []
-
-    async for chunk in astream_llm([
-        ("system", system),
-        ("human", human)
-    ]):
-        chunks.append(chunk)
-
-    return "".join(chunks).strip()
 
 
 def _build_appointments_list(rows: list) -> list[dict]:
@@ -86,7 +74,7 @@ def _spoken_slots(appointments_list: list[dict]) -> str:
 
 
 def _unique_dates(appointments_list: list[dict]) -> list[str]:
-    seen = []
+    seen: list[str] = []
     for a in appointments_list:
         if a["date"] not in seen:
             seen.append(a["date"])
@@ -102,15 +90,11 @@ async def _handle_initial(state: dict, user_id: int) -> dict:
         return update_state(state, speech_ai_text=DB_ERROR_RESPONSE, cancellation_complete=True)
 
     if not rows:
-        return update_state(
-            state,
-            cancellation_complete=True,
-            speech_ai_text=NO_APPOINTMENTS_RESPONSE,
-        )
+        return update_state(state, cancellation_complete=True, speech_ai_text=NO_APPOINTMENTS_RESPONSE)
 
     appointments_list = _build_appointments_list(rows)
-    dates             = _unique_dates(appointments_list)
-    date_lines        = "\n".join(f"  - {d}" for d in dates)
+    dates      = _unique_dates(appointments_list)
+    date_lines = "\n".join(f"  - {d}" for d in dates)
 
     if len(dates) == 1:
         if len(appointments_list) == 1:
@@ -120,7 +104,7 @@ async def _handle_initial(state: dict, user_id: int) -> dict:
                 appointments_list=appointments_list,
                 cancellation_appointment=chosen,
                 cancellation_stage="ask_confirm",
-                cancellation_awaiting_fresh_input=True, 
+                cancellation_awaiting_fresh_input=True,
                 speech_ai_text=(
                     f"You have one upcoming appointment on {dates[0]}: "
                     f"{chosen['type_name']} from {chosen['start_time']} "
@@ -154,7 +138,7 @@ async def _handle_initial(state: dict, user_id: int) -> dict:
 
 async def _handle_ask_date(state: dict, user_text: str) -> dict:
     appointments_list = state.get("appointments_list", [])
-    dates             = _unique_dates(appointments_list)
+    dates = _unique_dates(appointments_list)
 
     if not user_text:
         date_lines = "\n".join(f"  - {d}" for d in dates)
@@ -165,7 +149,7 @@ async def _handle_ask_date(state: dict, user_text: str) -> dict:
 
     try:
         dates_list   = "\n".join(f"  - {d}" for d in dates)
-        matched_date = await _llm_invoke(
+        matched_date = await llm_invoke_raw(
             system=SELECT_DATE_PROMPT.format(dates_list=dates_list, user_text=user_text),
             human=user_text,
         )
@@ -203,7 +187,7 @@ async def _handle_ask_date(state: dict, user_text: str) -> dict:
             state,
             cancellation_appointment=chosen,
             cancellation_stage="ask_confirm",
-            cancellation_awaiting_fresh_input=True,  
+            cancellation_awaiting_fresh_input=True,
             speech_ai_text=(
                 f"I found your {chosen['type_name']} appointment on {chosen['date']} "
                 f"from {chosen['start_time']} to {chosen['end_time']}. "
@@ -230,11 +214,11 @@ async def _handle_ask_slot(state: dict, user_text: str) -> dict:
         return update_state(state, speech_ai_text="Please say which time slot you would like to cancel.")
 
     try:
-        slots_text    = "\n".join(
+        slots_text = "\n".join(
             f"{i+1}. {a['type_name']} from {a['start_time']} to {a['end_time']}"
             for i, a in enumerate(appointments_list)
         )
-        matched_index = await _llm_invoke(
+        matched_index = await llm_invoke_raw(
             system=SELECT_SLOT_PROMPT.format(
                 date=appointments_list[0]["date"] if appointments_list else "",
                 slots_list=slots_text,
@@ -266,7 +250,7 @@ async def _handle_ask_slot(state: dict, user_text: str) -> dict:
         state,
         cancellation_appointment=chosen,
         cancellation_stage="ask_confirm",
-        cancellation_awaiting_fresh_input=True,  
+        cancellation_awaiting_fresh_input=True,
         speech_ai_text=(
             f"You selected the {chosen['type_name']} appointment "
             f"from {chosen['start_time']} to {chosen['end_time']} on {chosen['date']}. "
@@ -283,8 +267,7 @@ async def cancellation_slot_selection_node(state: dict) -> dict:
       - Asking which date     (stage="ask_date")
       - Asking which slot     (stage="ask_slot")
 
-    Transitions to cancel_appointment_node once cancellation_stage="ask_confirm"
-    and cancellation_appointment is set.
+    Transitions to cancel_appointment_node once cancellation_stage="ask_confirm".
     """
     print("[cancellation_slot_selection_node] -----------------------------")
 
@@ -305,5 +288,3 @@ async def cancellation_slot_selection_node(state: dict) -> dict:
 
     print(f"[cancellation_slot_selection_node] WARNING: Unhandled stage='{stage}' — passing through.")
     return state
-
-

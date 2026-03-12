@@ -1,57 +1,15 @@
-EMERGENCY_SYSTEM_PROMPT = """
-You are a medical triage screener.
+"""
+clarify_node_prompt.py
 
-Your ONLY job is to detect genuine life-threatening emergencies described by a patient.
+Prompts used by clarify_node.py.
 
-Respond with exactly one word — no punctuation, no explanation:
-EMERGENCY → if the message clearly describes an active, life-threatening medical event such as:
-            chest pain, heart attack, stroke, cannot breathe, severe bleeding,
-            unconscious, seizure, severe allergic reaction, suspected poisoning.
+NOTE: EMERGENCY_SYSTEM_PROMPT, COVERAGE_CHECK_SYSTEM_PROMPT, and
+COVERAGE_CHECK_HUMAN_TEMPLATE have been removed — their logic was merged
+into _TRIAGE_AND_COVERAGE_SYSTEM_PROMPT inside clarify_node.py so that
+both checks run as a single LLM call per turn.
+"""
 
-SAFE      → for everything else, including:
-            - vague or unclear messages ("what?", "can you repeat", "I didn't hear")
-            - non-medical statements, confusion, or gibberish
-            - mild or chronic symptoms
-            - questions or requests for clarification
-            - anything that is not clearly a medical emergency
-
-When in doubt: SAFE.
-""".strip()
-
-
-COVERAGE_CHECK_SYSTEM_PROMPT = """
-You are a strict medical intake checker. Your job is to check which topics have been CLEARLY and EXPLICITLY answered in a conversation.
-
-Topic definitions and pass/fail criteria:
-
-1. main symptom or complaint
-   PASS: patient names a specific problem — "headache", "fever", "knee pain", "rash on my arm", "I've been coughing"
-   FAIL: vague — "not feeling well", "something's wrong", "I'm sick", "not good"
-
-2. when it started or how long they have had it
-   PASS: any time reference — "since yesterday", "3 days ago", "last week", "this morning", "for about a month"
-   FAIL: no time mentioned at all
-
-3. patient age in years
-   PASS: a specific number — "I'm 34", "34 years old", "born in 1990", "I'm 7"
-   FAIL: vague — "young", "child", "adult", "elderly", "middle-aged", "old"
-
-4. any existing medical conditions or allergies
-   PASS: specific condition/allergy named — "I'm diabetic", "I have asthma", "allergic to penicillin"
-         OR explicit denial — "no", "none", "nothing", "I don't have any", "no allergies", "I'm healthy"
-   FAIL: no mention of conditions or allergies at all
-
-IMPORTANT:
-- Be strict. If there is ANY doubt, mark as NOT covered.
-- A topic is covered only if the patient themselves stated it — not if the agent asked about it.
-- Do NOT infer or assume. Only mark covered if explicitly stated.
-
-Reply with ONLY the numbers of clearly answered topics, comma-separated.
-If none are clearly answered, reply with: NONE
-
-Do not explain. Do not add any other text.
-""".strip()
-
+# ── Conversation prompt ───────────────────────────────────────────────────────
 
 CLARIFY_SYSTEM_PROMPT = """
 You are a warm, caring clinic receptionist having a real phone conversation with a patient.
@@ -87,15 +45,7 @@ When all four topics are covered, end with exactly:
 """.strip()
 
 
-COVERAGE_CHECK_HUMAN_TEMPLATE = """Conversation so far:
-{conversation}
-
-Topics to check (numbered):
-{topics_numbered}
-
-Which of these topics has the PATIENT clearly and explicitly answered?
-Reply with ONLY the numbers, comma-separated. If none: NONE"""
-
+# ── Topic list (shared between node and prompt layer) ────────────────────────
 
 TOPICS = [
     "main symptom or complaint (must be specific, not vague)",
@@ -104,6 +54,8 @@ TOPICS = [
     "any existing medical conditions or allergies (or explicit confirmation of none)",
 ]
 
+
+# ── Static responses ──────────────────────────────────────────────────────────
 
 EMERGENCY_RESPONSE = (
     "This sounds like a medical emergency. "
@@ -114,4 +66,3 @@ FALLBACK_RESPONSE = (
     "I'm so sorry, something went wrong on our end. "
     "Could you give me just a moment?"
 )
-

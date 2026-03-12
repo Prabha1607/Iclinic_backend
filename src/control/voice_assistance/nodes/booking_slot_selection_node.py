@@ -1,7 +1,7 @@
 from __future__ import annotations
 import json
 from datetime import date, datetime, timezone, timedelta
-from src.control.voice_assistance.models import ainvoke_llm, astream_llm, get_llama1
+from src.control.voice_assistance.models import ainvoke_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 from src.control.voice_assistance.utils import (
     build_date_options_text,
@@ -88,22 +88,14 @@ async def _fetch_all_slots(doctor_id: int) -> list[dict]:
 
 async def _llm_extract(system: str, human: str) -> dict:
     try:
-        full_response = ""
-
-        async for chunk in astream_llm([
-            ("system", system),
-            ("human", human)
-        ]):
-            full_response += chunk
-
-        raw = full_response.strip()
-
+        llm = get_llama1()
+        response = await llm.ainvoke([("system", system), ("human", human)])
+        raw = response.content.strip()
         try:
             return json.loads(clear_markdown(raw))
         except Exception as parse_err:
             print("[_llm_extract] parse error:", parse_err, "| raw:", raw)
             return {}
-
     except Exception as e:
         print("[_llm_extract] error:", e)
         return {}
@@ -117,7 +109,10 @@ def _parse_date(value: str | None) -> date | None:
 
 
 async def _speak(history: list[dict], doctor_name: str, situation: str, context: str) -> str:
-    
+    """
+    Generate a spoken response entirely via LLM.
+    No hardcoded fallback — the LLM always decides what to say.
+    """
     seed = history if history else [{"role": "user", "content": "start"}]
     messages = [
         {

@@ -1,124 +1,79 @@
 import json
 import traceback
+
 from src.core.services.available_slots import change_slot_status
-from src.data.repositories.generic_crud import insert_instance
-from src.control.voice_assistance.prompts.book_appointment_node_prompt import (
-    EXTRACT_CONTEXT_PROMPT,
-    DEFAULT_CONTEXT,
-)
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus, BookingChannel, SlotStatus
-from src.control.voice_assistance.models import astream_llm, get_llama1
-from src.control.voice_assistance.utils import clear_markdown, update_state
-
-
-def _build_history_text(conversation_history: list | str) -> str:
-    if not isinstance(conversation_history, list):
-        return str(conversation_history)
-
-    lines = []
-
-    for turn in conversation_history:
-        if isinstance(turn, dict):
-            role = turn.get("role", "unknown").capitalize()
-            text = turn.get("content", "")
-
-        elif isinstance(turn, (list, tuple)) and len(turn) == 2:
-            role, text = turn[0].capitalize(), turn[1]
-
-        else:
-            continue
-
-        lines.append(f"{role}: {text}")
-
-    return "\n".join(lines)
+from src.data.repositories.generic_crud import insert_instance
+from src.control.voice_assistance.prompts.book_appointment_node_prompt import (
+    DEFAULT_CONTEXT,
+    EXTRACT_CONTEXT_PROMPT,
+)
+from src.control.voice_assistance.utils import build_history_text, llm_extract_json, update_state
 
 
 async def extract_appointment_context(conversation_history: list | str) -> dict:
-    history_text = _build_history_text(conversation_history)
-
+    """Extract reason, notes, and instructions from the conversation using the LLM."""
+    history_text = build_history_text(conversation_history)
     try:
-        full_response = ""
-
-        async for chunk in astream_llm([
-            ("system", EXTRACT_CONTEXT_PROMPT),
-            ("human", f"Conversation:\n{history_text}")
-        ]):
-            full_response += chunk
-
-        parsed = json.loads(clear_markdown(full_response.strip()))
-        return parsed
-
+        parsed = await llm_extract_json(
+            system=EXTRACT_CONTEXT_PROMPT,
+            human=f"Conversation:\n{history_text}",
+        )
+        return parsed or DEFAULT_CONTEXT
     except Exception:
         return DEFAULT_CONTEXT
-    
+
 
 async def book_appointment_node(state: dict) -> dict:
     print("\n[book_appointment_node] --------------------------------")
 
-    
     if state.get("slot_stage") != "ready_to_book":
         print("[SKIP] Slot stage not ready")
         return {**state, "booking_appointment_completed": False}
 
-    matched = state.get("slot_selected")
-    doctor_id = state.get("doctor_confirmed_id")
-    doctor_name = state.get("doctor_confirmed_name", "the doctor")
-
-    patient_id = state.get("identity_patient_id")
+    matched             = state.get("slot_selected")
+    doctor_id           = state.get("doctor_confirmed_id")
+    doctor_name         = state.get("doctor_confirmed_name", "the doctor")
+    patient_id          = state.get("identity_patient_id")
     appointment_type_id = state.get("mapping_appointment_type_id")
-    patient_name = state.get("identity_user_name", "the patient")
-
+    patient_name        = state.get("identity_user_name", "the patient")
     conversation_history = list(state.get("clarify_conversation_history") or [])
-
 
     if not matched:
         print("[ERROR] No slot selected")
         return {**state, "booking_appointment_completed": False}
 
-    context = await extract_appointment_context(conversation_history)
-
-
+    context          = await extract_appointment_context(conversation_history)
     reason_for_visit = context.get("reason_for_visit")
-    notes = context.get("notes")
-    instructions = context.get("instructions")
+    notes            = context.get("notes")
+    instructions     = context.get("instructions")
 
     try:
-
         payload = {
-            "user_id": patient_id,
-            "provider_id": doctor_id,
-            "appointment_type_id": appointment_type_id,
-            "patient_name": patient_name,
+            "user_id":              patient_id,
+            "provider_id":          doctor_id,
+            "appointment_type_id":  appointment_type_id,
+            "patient_name":         patient_name,
             "availability_slot_id": matched["id"],
-            "scheduled_date": matched["date"],
+            "scheduled_date":       matched["date"],
             "scheduled_start_time": matched["start_time"],
-            "scheduled_end_time": matched["end_time"],
-            "status": AppointmentStatus.SCHEDULED,
-            "booking_channel": BookingChannel.VOICE,
-            "reason_for_visit": reason_for_visit,
-            "notes": notes,
-            "instructions": instructions,
-            "is_active": True,
+            "scheduled_end_time":   matched["end_time"],
+            "status":               AppointmentStatus.SCHEDULED,
+            "booking_channel":      BookingChannel.VOICE,
+            "reason_for_visit":     reason_for_visit,
+            "notes":                notes,
+            "instructions":         instructions,
+            "is_active":            True,
         }
-
         print(json.dumps(payload, indent=2, default=str))
 
         async with AsyncSessionLocal() as db:
-                await insert_instance(
-                    Appointment,
-                    db,
-                    **payload
-                )
-                await change_slot_status(
-                    db=db,
-                    slot_id=matched["id"],
-                    new_status=SlotStatus.BOOKED
-                )
+            await insert_instance(Appointment, db, **payload)
+            await change_slot_status(db=db, slot_id=matched["id"], new_status=SlotStatus.BOOKED)
 
-
-    except Exception as e:
+    except Exception:
         traceback.print_exc()
         return update_state(
             state,
@@ -130,11 +85,7 @@ async def book_appointment_node(state: dict) -> dict:
         f"Perfect! Your appointment with {doctor_name} is confirmed for "
         f"{matched['full_display']}. You'll receive a confirmation shortly."
     )
-
-    conversation_history.append({
-        "role": "assistant",
-        "content": confirmation_text
-    })
+    conversation_history.append({"role": "assistant", "content": confirmation_text})
 
     return update_state(
         state,
@@ -149,5 +100,3 @@ async def book_appointment_node(state: dict) -> dict:
         booking_appointment_completed=True,
         speech_ai_text=confirmation_text,
     )
-
-

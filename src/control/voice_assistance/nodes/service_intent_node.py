@@ -1,4 +1,4 @@
-from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.models import ainvoke_llm, get_llama1
 from src.control.voice_assistance.prompts.service_intent_node_prompt import (
     SERVICE_INTENT_PROMPT,
     SERVICE_INTENT_VERIFIER_PROMPT,
@@ -20,7 +20,8 @@ async def service_intent_node(state: dict) -> dict:
     messages = [{"role": "system", "content": SERVICE_INTENT_PROMPT}, *seed]
 
     try:
-        response = await ainvoke_llm(messages)
+        llm = get_llama1()
+        response = await llm.ainvoke(messages)
         ai_text = response.content.strip().strip('"').strip("'")
         print("[ai_response]:", ai_text)
 

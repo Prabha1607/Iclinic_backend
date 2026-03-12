@@ -2,7 +2,7 @@ import json
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.repositories.generic_crud import bulk_get_instance
 from src.data.models.postgres.user import User, ProviderProfile
-from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.models import ainvoke_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown
 from src.control.voice_assistance.prompts.doctor_selection_node_prompt import (
     NO_DOCTORS_RESPONSE,
@@ -117,7 +117,8 @@ async def doctor_selection_node(state: dict) -> dict:
 
             if user_intent in ("asking_info", "change_request", "unclear"):
                 messages = _build_messages("handle_question", history, doctors, intent, previous_doctor_name, user_change_request)
-                response = await ainvoke_llm(messages)
+                llm = get_llama1()
+                response = await llm.ainvoke(messages)
                 ai_text = response.content.strip().strip('"').strip("'")
                 history.append({"role": "assistant", "content": ai_text})
                 return {
@@ -132,7 +133,8 @@ async def doctor_selection_node(state: dict) -> dict:
     if len(available_doctors) == 1 and not user_change_request:
         doctor = available_doctors[0]
         messages = _build_messages("auto_select", history, available_doctors, intent, previous_doctor_name, user_change_request)
-        response = await ainvoke_llm(messages)
+        llm = get_llama1()
+        response = await llm.ainvoke(messages)
         ai_text = response.content.strip().strip('"').strip("'")
         history.append({"role": "assistant", "content": ai_text})
         return {
@@ -152,7 +154,8 @@ async def doctor_selection_node(state: dict) -> dict:
 
         if user_intent == "asking_info":
             messages = _build_messages("handle_question", history, available_doctors, intent, previous_doctor_name, user_change_request)
-            response = await ainvoke_llm(messages)
+            llm = get_llama1()
+            response = await llm.ainvoke(messages)
             ai_text = response.content.strip().strip('"').strip("'")
             history.append({"role": "assistant", "content": ai_text})
             return {
@@ -167,7 +170,8 @@ async def doctor_selection_node(state: dict) -> dict:
             doctor_id, doctor_name = await _verify_selection(user_text, available_doctors)
             if doctor_id:
                 messages = _build_messages("confirm_selection", history, available_doctors, intent, previous_doctor_name, user_change_request)
-                response = await ainvoke_llm(messages)
+                llm = get_llama1()
+                response = await llm.ainvoke(messages)
                 ai_text = response.content.strip().strip('"').strip("'")
                 history.append({"role": "assistant", "content": ai_text})
                 return {
@@ -182,7 +186,8 @@ async def doctor_selection_node(state: dict) -> dict:
                 }
 
     messages = _build_messages("present_options", history, available_doctors, intent, previous_doctor_name, user_change_request)
-    response = await ainvoke_llm(messages)
+    llm = get_llama1()
+    response = await llm.ainvoke(messages)
     ai_text = response.content.strip().strip('"').strip("'")
     print("[ai_response]:", ai_text)
     history.append({"role": "assistant", "content": ai_text})
@@ -195,5 +200,4 @@ async def doctor_selection_node(state: dict) -> dict:
         "doctor_selection_history": history,
         "speech_ai_text": ai_text,
     }
-
 
