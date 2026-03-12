@@ -85,6 +85,8 @@ async def login_user(request: Request, response: Response, user_data: UserLogin,
         response.set_cookie(key="access_token", value=access_token, httponly=True, samesite="lax", secure=False, max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60)
         response.set_cookie(key="refresh_token", value=refresh_token, httponly=True, samesite="lax", secure=False, max_age=settings.REFRESH_TOKEN_EXPIRE_DAYS * 86000)
 
+       
+
         logger.info("User logged in", extra={"user_id": user.id})
         return {"message": "Authentication Successfull!!!", "access_token": access_token}
 

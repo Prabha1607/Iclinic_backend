@@ -101,7 +101,11 @@ async def _detect_change_intent(user_text: str) -> str:
         return "none"
 
 
+import time
+
 async def stt_node(state: dict) -> dict:
+    start_time = time.time()
+    print(f"[stt_node] start_time: {start_time:.4f}")
 
     user_text: str | None = state.get("speech_user_text")
 
@@ -119,23 +123,19 @@ async def stt_node(state: dict) -> dict:
         "speech_user_text":             cleaned,
         "clarify_conversation_history": history,
         "user_change_request":          None,
+        "pipeline_start_time":          start_time,
     }
 
     intent = await _detect_change_intent(cleaned)
 
     if intent == "change_doctor" and state.get("doctor_confirmed_id") is not None:
-
         return _reset_from_doctor(base_state, cleaned)
 
     if intent == "change_date" and state.get("slot_chosen_date") is not None:
-        
         return _reset_from_date(base_state, cleaned)
 
     if intent == "change_slot" and state.get("slot_selected") is not None:
-
         return _reset_from_slot(base_state, cleaned)
 
     return base_state
 
-
-    

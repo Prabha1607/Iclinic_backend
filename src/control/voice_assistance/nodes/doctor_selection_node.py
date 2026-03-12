@@ -1,4 +1,5 @@
 import json
+from src.control.voice_assistance.call_cache import ensure_cache,_cache
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.repositories.generic_crud import bulk_get_instance
 from src.data.models.postgres.user import User, ProviderProfile
@@ -12,23 +13,48 @@ from src.control.voice_assistance.prompts.doctor_selection_node_prompt import (
 )
 
 
+# async def fetch_doctors(appointment_type_id: int) -> list[dict]:
+#     async with AsyncSessionLocal() as db:
+#         users = await bulk_get_instance(User, db, role_id=2, is_active=True, appointment_type_id=appointment_type_id)
+#         doctor_ids = [u.id for u in users]
+#         all_profiles = await bulk_get_instance(ProviderProfile, db)
+#         profile_map = {p.user_id: p for p in all_profiles if p.user_id in doctor_ids}
+#         return [
+#             {
+#                 "id": u.id,
+#                 "name": f"Dr. {u.first_name} {u.last_name}",
+#                 "specialization": profile_map[u.id].specialization if u.id in profile_map else "N/A",
+#                 "qualification": profile_map[u.id].qualification if u.id in profile_map else "N/A",
+#                 "experience": profile_map[u.id].experience if u.id in profile_map else 0,
+#                 "bio": profile_map[u.id].bio if u.id in profile_map else "",
+#             }
+#             for u in users
+#         ]
+
+
+
 async def fetch_doctors(appointment_type_id: int) -> list[dict]:
-    async with AsyncSessionLocal() as db:
-        users = await bulk_get_instance(User, db, role_id=2, is_active=True, appointment_type_id=appointment_type_id)
-        doctor_ids = [u.id for u in users]
-        all_profiles = await bulk_get_instance(ProviderProfile, db)
-        profile_map = {p.user_id: p for p in all_profiles if p.user_id in doctor_ids}
-        return [
-            {
-                "id": u.id,
-                "name": f"Dr. {u.first_name} {u.last_name}",
-                "specialization": profile_map[u.id].specialization if u.id in profile_map else "N/A",
-                "qualification": profile_map[u.id].qualification if u.id in profile_map else "N/A",
-                "experience": profile_map[u.id].experience if u.id in profile_map else 0,
-                "bio": profile_map[u.id].bio if u.id in profile_map else "",
-            }
-            for u in users
-        ]
+    await ensure_cache()
+
+    doctors: dict  = _cache["doctors"]
+    profiles: dict = _cache["profiles"]
+
+    filtered_users = [
+        u for u in doctors.values()
+        if u.appointment_type_id == appointment_type_id
+    ]
+
+    return [
+        {
+            "id": u.id,
+            "name": f"Dr. {u.first_name} {u.last_name}",
+            "specialization": profiles[u.id].specialization if u.id in profiles else "N/A",
+            "qualification":  profiles[u.id].qualification  if u.id in profiles else "N/A",
+            "experience":     profiles[u.id].experience     if u.id in profiles else 0,
+            "bio":            profiles[u.id].bio            if u.id in profiles else "",
+        }
+        for u in filtered_users
+    ]
 
 
 def _doctors_context(doctors: list[dict]) -> str:

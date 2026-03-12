@@ -1,6 +1,7 @@
 from __future__ import annotations
 import json
-from datetime import date, datetime, timezone, timedelta
+from datetime import time, date, datetime, timezone, timedelta
+from src.control.voice_assistance.call_cache import ensure_cache,_cache
 from src.control.voice_assistance.models import ainvoke_llm, get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 from src.control.voice_assistance.utils import (
@@ -36,7 +37,6 @@ IST = timezone(timedelta(hours=5, minutes=30))
 
 
 def _now_ist() -> datetime:
-    """Return current datetime in IST."""
     return datetime.now(tz=IST)
 
 
@@ -48,44 +48,87 @@ def _now_time_ist():
     return _now_ist().time()
 
 
+# async def _fetch_all_slots(doctor_id: int) -> list[dict]:
+#     try:
+#         async with AsyncSessionLocal() as db:
+#             today = _today_ist()
+#             now_time = _now_time_ist()
+
+#             all_slots = await bulk_get_instance(AvailableSlot, db, provider_id=doctor_id, is_active=True)
+#             future_available = [
+#                 s for s in all_slots
+#                 if s.status == SlotStatus.AVAILABLE
+#                 and (
+#                     s.availability_date > today
+#                     or (s.availability_date == today and s.start_time > now_time)
+#                 )
+#             ]
+#             all_appointments = await bulk_get_instance(Appointment, db, provider_id=doctor_id, is_active=True)
+#             booked_slot_ids = {
+#                 a.availability_slot_id for a in all_appointments
+#                 if str(a.status.value).upper() in ("SCHEDULED", "CONFIRMED")
+#             }
+#             return [
+#                 {
+#                     "id":           s.id,
+#                     "date":         s.availability_date,
+#                     "start_time":   s.start_time,
+#                     "end_time":     s.end_time,
+#                     "period":       classify_period(s.start_time),
+#                     "display":      f"{format_time(s.start_time)} → {format_time(s.end_time)}",
+#                     "full_display": f"{format_time(s.start_time)} → {format_time(s.end_time)} on {format_date(s.availability_date)}",
+#                 }
+#                 for s in future_available
+#                 if s.id not in booked_slot_ids
+#             ]
+#     except Exception as e:
+#         print("[_fetch_all_slots] error:", e)
+#         return []
+
 async def _fetch_all_slots(doctor_id: int) -> list[dict]:
     try:
-        async with AsyncSessionLocal() as db:
-            today = _today_ist()
-            now_time = _now_time_ist()
+        await ensure_cache()
 
-            all_slots = await bulk_get_instance(AvailableSlot, db, provider_id=doctor_id, is_active=True)
-            future_available = [
-                s for s in all_slots
-                if s.status == SlotStatus.AVAILABLE
-                and (
-                    s.availability_date > today
-                    or (s.availability_date == today and s.start_time > now_time)
-                )
-            ]
-            all_appointments = await bulk_get_instance(Appointment, db, provider_id=doctor_id, is_active=True)
-            booked_slot_ids = {
-                a.availability_slot_id for a in all_appointments
-                if str(a.status.value).upper() in ("SCHEDULED", "CONFIRMED")
+        today    = _today_ist()
+        now_time = _now_time_ist()
+
+        # ── filter slots for this doctor ──────────────────────────────────────
+        doctor_slots = [
+            s for s in _cache["slots"]
+            if s.provider_id == doctor_id
+            and s.status == SlotStatus.AVAILABLE
+            and (
+                s.availability_date > today
+                or (s.availability_date == today and s.start_time > now_time)
+            )
+        ]
+
+        # ── booked slot ids for this doctor ───────────────────────────────────
+        booked_slot_ids = {
+            a.availability_slot_id
+            for a in _cache["appointments"]
+            if a.provider_id == doctor_id
+            and str(a.status.value).upper() in ("SCHEDULED", "CONFIRMED")
+        }
+
+        return [
+            {
+                "id":           s.id,
+                "date":         s.availability_date,
+                "start_time":   s.start_time,
+                "end_time":     s.end_time,
+                "period":       classify_period(s.start_time),
+                "display":      f"{format_time(s.start_time)} → {format_time(s.end_time)}",
+                "full_display": f"{format_time(s.start_time)} → {format_time(s.end_time)} on {format_date(s.availability_date)}",
             }
-            return [
-                {
-                    "id":           s.id,
-                    "date":         s.availability_date,
-                    "start_time":   s.start_time,
-                    "end_time":     s.end_time,
-                    "period":       classify_period(s.start_time),
-                    "display":      f"{format_time(s.start_time)} → {format_time(s.end_time)}",
-                    "full_display": f"{format_time(s.start_time)} → {format_time(s.end_time)} on {format_date(s.availability_date)}",
-                }
-                for s in future_available
-                if s.id not in booked_slot_ids
-            ]
+            for s in doctor_slots
+            if s.id not in booked_slot_ids
+        ]
+
     except Exception as e:
         print("[_fetch_all_slots] error:", e)
         return []
-
-
+    
 async def _llm_extract(system: str, human: str) -> dict:
     try:
         llm = get_llama1()
@@ -109,10 +152,6 @@ def _parse_date(value: str | None) -> date | None:
 
 
 async def _speak(history: list[dict], doctor_name: str, situation: str, context: str) -> str:
-    """
-    Generate a spoken response entirely via LLM.
-    No hardcoded fallback — the LLM always decides what to say.
-    """
     seed = history if history else [{"role": "user", "content": "start"}]
     messages = [
         {
@@ -130,7 +169,7 @@ async def _speak(history: list[dict], doctor_name: str, situation: str, context:
         return response.content.strip().strip('"').strip("'")
     except Exception as e:
         print("[_speak] error:", e)
-        return f"I'm sorry, I ran into a technical issue. Could you please repeat that?"
+        return "I'm sorry, I ran into a technical issue. Could you please repeat that?"
 
 
 async def _resolve_and_confirm_slot(state: dict, matched_slot: dict) -> dict:
@@ -154,10 +193,100 @@ async def _handle_initial(state: dict, doctor_name: str) -> dict:
         context=f"Doctor: {doctor_name}",
     )
     history.append({"role": "assistant", "content": ai_text})
-    return update_state(state, slot_stage="ask_date", slot_selection_completed=False, speech_ai_text=ai_text, slot_selection_history=history)
+    return update_state(
+        state,
+        slot_stage="ask_date",
+        slot_selection_completed=False,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
 
 
-async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_slots: list[dict], available_dates: list[date]) -> dict:
+async def _handle_selecting(
+    state: dict,
+    user_text: str,
+    doctor_name: str,
+    all_slots: list[dict],
+    available_dates: list[date],
+) -> dict:
+    history: list[dict] = list(state.get("slot_selection_history") or [])
+    user_change_request: str | None = state.get("user_change_request")
+    chosen_date: date | None = state.get("slot_chosen_date")
+    chosen_period: str | None = state.get("slot_chosen_period")
+    prev_start: str | None = state.get("slot_selected_start_time")
+    prev_end: str | None = state.get("slot_selected_end_time")
+
+    print(
+        f"[_handle_selecting] change_request={user_change_request!r} "
+        f"date={chosen_date} period={chosen_period} "
+        f"prev={prev_start}→{prev_end}"
+    )
+
+    if chosen_date:
+        date_slots = slots_for_date(all_slots, chosen_date)
+        period_slots = (
+            [s for s in date_slots if s["period"] == chosen_period]
+            if chosen_period
+            else date_slots
+        )
+
+        filtered = (
+            exclude_previously_selected_slot(period_slots, user_change_request, prev_start, prev_end)
+            or period_slots
+        )
+
+        if filtered:
+            slot_options = ", ".join(s["display"] for s in filtered)
+            ai_text = await _speak(
+                history, doctor_name,
+                situation=(
+                    "patient wants to change their slot — "
+                    "acknowledge the change request warmly and present the remaining "
+                    "available slots on their already-chosen date"
+                ),
+                context=(
+                    f"Date: {format_date(chosen_date)}, "
+                    f"Period: {chosen_period or 'any'}, "
+                    f"Available slots (excluding previous): {slot_options}"
+                ),
+            )
+            history.append({"role": "assistant", "content": ai_text})
+            return update_state(
+                state,
+                slot_stage="ask_slot",
+                slot_chosen_date=chosen_date,
+                slot_chosen_period=chosen_period,
+                slot_available_list=filtered,
+                user_change_request=user_change_request, 
+                speech_ai_text=ai_text,
+                slot_selection_history=history,
+            )
+
+    ai_text = await _speak(
+        history, doctor_name,
+        situation="patient wants to change their appointment — ask what date they'd like instead",
+        context=f"Doctor: {doctor_name}",
+    )
+    history.append({"role": "assistant", "content": ai_text})
+    return update_state(
+        state,
+        slot_stage="ask_date",
+        slot_chosen_date=None,
+        slot_chosen_period=None,
+        slot_available_list=None,
+        user_change_request=user_change_request,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
+
+
+async def _handle_ask_date(
+    state: dict,
+    user_text: str,
+    doctor_name: str,
+    all_slots: list[dict],
+    available_dates: list[date],
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     user_change_request: str | None = state.get("user_change_request")
     previous_date: date | None = state.get("slot_chosen_date")
@@ -169,14 +298,23 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
         filtered_slots = all_slots
         filtered_dates = available_dates
 
-    parsed = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()), human=user_text)
+    parsed = await _llm_extract(
+        system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()),
+        human=user_text,
+    )
     chosen_date = _parse_date(parsed.get("date"))
 
     if chosen_date is None:
         ai_text = await _speak(
             history, doctor_name,
-            situation="couldn't understand the date the patient mentioned — ask them to clarify with an example like 'March 8' or 'next Monday'",
-            context=f"Change request: {user_change_request or 'none'}, Previous date: {format_date(previous_date) if previous_date else 'none'}",
+            situation=(
+                "couldn't understand the date the patient mentioned — "
+                "ask them to clarify with an example like 'March 8' or 'next Monday'"
+            ),
+            context=(
+                f"Change request: {user_change_request or 'none'}, "
+                f"Previous date: {format_date(previous_date) if previous_date else 'none'}"
+            ),
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -185,8 +323,14 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
         alt_dates = [d for d in filtered_dates[:3] if d != previous_date]
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient picked the same date they already had — gently point that out and offer the alternate dates listed in context",
-            context=f"Same date chosen: {format_date(chosen_date)}, Alternate available dates: {', '.join(format_date(d) for d in alt_dates)}",
+            situation=(
+                "patient picked the same date they already had — "
+                "gently point that out and offer the alternate dates listed in context"
+            ),
+            context=(
+                f"Same date chosen: {format_date(chosen_date)}, "
+                f"Alternate available dates: {', '.join(format_date(d) for d in alt_dates)}"
+            ),
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -200,7 +344,13 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
             context=f"Chosen date: {format_date(chosen_date)}, Doctor: {doctor_name}",
         )
         history.append({"role": "assistant", "content": ai_text})
-        return update_state(state, slot_stage="confirm_date", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
+        return update_state(
+            state,
+            slot_stage="confirm_date",
+            slot_chosen_date=chosen_date,
+            speech_ai_text=ai_text,
+            slot_selection_history=history,
+        )
 
     alts = get_nearest_alternate_dates(chosen_date, filtered_dates)
     if not alts:
@@ -215,13 +365,22 @@ async def _handle_ask_date(state: dict, user_text: str, doctor_name: str, all_sl
     ai_text = await _speak(
         history, doctor_name,
         situation="requested date has no slots — apologise and offer the nearest alternate dates listed in context",
-        context=f"Requested date: {format_date(chosen_date)}, Nearest available dates: {', '.join(format_date(d) for d in alts)}",
+        context=(
+            f"Requested date: {format_date(chosen_date)}, "
+            f"Nearest available dates: {', '.join(format_date(d) for d in alts)}"
+        ),
     )
     history.append({"role": "assistant", "content": ai_text})
     return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
 
 
-async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, all_slots: list[dict], available_dates: list[date]) -> dict:
+async def _handle_confirm_date(
+    state: dict,
+    user_text: str,
+    doctor_name: str,
+    all_slots: list[dict],
+    available_dates: list[date],
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     chosen_date: date = state.get("slot_chosen_date")
     user_change_request: str | None = state.get("user_change_request")
@@ -231,9 +390,15 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
 
     if confirmed is True:
         date_slots = slots_for_date(all_slots, chosen_date)
-        return await _proceed_to_period({**state, "user_change_request": None, "slot_selection_history": history}, doctor_name, chosen_date, date_slots)
+        return await _proceed_to_period(
+            {**state, "user_change_request": None, "slot_selection_history": history},
+            doctor_name, chosen_date, date_slots,
+        )
 
-    parsed2 = await _llm_extract(system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()), human=user_text)
+    parsed2 = await _llm_extract(
+        system=LLM_DATE_SYSTEM.format(today=_today_ist().isoformat()),
+        human=user_text,
+    )
     new_date = _parse_date(parsed2.get("date"))
 
     if user_change_request and chosen_date:
@@ -252,13 +417,22 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
                 context=f"New date: {format_date(new_date)}, Doctor: {doctor_name}",
             )
             history.append({"role": "assistant", "content": ai_text})
-            return update_state(state, slot_stage="confirm_date", slot_chosen_date=new_date, speech_ai_text=ai_text, slot_selection_history=history)
+            return update_state(
+                state,
+                slot_stage="confirm_date",
+                slot_chosen_date=new_date,
+                speech_ai_text=ai_text,
+                slot_selection_history=history,
+            )
 
         alts = get_nearest_alternate_dates(new_date, filtered_dates)
         ai_text = await _speak(
             history, doctor_name,
             situation="the new date the patient suggested also has no slots — apologise and offer the alternate dates from context",
-            context=f"Requested date: {format_date(new_date)}, Nearest available dates: {', '.join(format_date(d) for d in alts)}",
+            context=(
+                f"Requested date: {format_date(new_date)}, "
+                f"Nearest available dates: {', '.join(format_date(d) for d in alts)}"
+            ),
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_alternate_date", speech_ai_text=ai_text, slot_selection_history=history)
@@ -269,10 +443,24 @@ async def _handle_confirm_date(state: dict, user_text: str, doctor_name: str, al
         context=f"Rejected date: {format_date(chosen_date)}, Doctor: {doctor_name}",
     )
     history.append({"role": "assistant", "content": ai_text})
-    return update_state(state, slot_stage="ask_date", slot_chosen_date=None, slot_chosen_period=None, slot_available_list=None, speech_ai_text=ai_text, slot_selection_history=history)
+    return update_state(
+        state,
+        slot_stage="ask_date",
+        slot_chosen_date=None,
+        slot_chosen_period=None,
+        slot_available_list=None,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
 
 
-async def _handle_ask_alternate_date(state: dict, user_text: str, doctor_name: str, all_slots: list[dict], available_dates: list[date]) -> dict:
+async def _handle_ask_alternate_date(
+    state: dict,
+    user_text: str,
+    doctor_name: str,
+    all_slots: list[dict],
+    available_dates: list[date],
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     user_change_request: str | None = state.get("user_change_request")
     previous_date: date | None = state.get("slot_chosen_date")
@@ -285,7 +473,10 @@ async def _handle_ask_alternate_date(state: dict, user_text: str, doctor_name: s
         filtered_dates = available_dates
 
     parsed = await _llm_extract(
-        system=LLM_ALTERNATE_DATE_SYSTEM.format(today=_today_ist().isoformat(), date_options=build_date_options_text(filtered_dates)),
+        system=LLM_ALTERNATE_DATE_SYSTEM.format(
+            today=_today_ist().isoformat(),
+            date_options=build_date_options_text(filtered_dates),
+        ),
         human=user_text,
     )
     chosen_date = _parse_date(parsed.get("date"))
@@ -306,10 +497,18 @@ async def _handle_ask_alternate_date(state: dict, user_text: str, doctor_name: s
         context=f"Chosen date: {format_date(chosen_date)}, Doctor: {doctor_name}",
     )
     history.append({"role": "assistant", "content": ai_text})
-    return update_state(state, slot_stage="confirm_date", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
+    return update_state(
+        state,
+        slot_stage="confirm_date",
+        slot_chosen_date=chosen_date,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
 
 
-async def _proceed_to_period(state: dict, doctor_name: str, chosen_date: date, date_slots: list[dict]) -> dict:
+async def _proceed_to_period(
+    state: dict, doctor_name: str, chosen_date: date, date_slots: list[dict]
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     user_change_request: str | None = state.get("user_change_request")
     prev_start: str | None = state.get("slot_selected_start_time")
@@ -325,22 +524,48 @@ async def _proceed_to_period(state: dict, doctor_name: str, chosen_date: date, d
         slot_options = ", ".join(s["display"] for s in period_slots)
         ai_text = await _speak(
             history, doctor_name,
-            situation="only one time period is available — present the available time slots in that period and ask the patient to pick one",
-            context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Available slots: {slot_options}",
+            situation=(
+                "only one time period is available — present the available time slots "
+                "in that period and ask the patient to pick one"
+            ),
+            context=(
+                f"Date: {format_date(chosen_date)}, "
+                f"Period: {chosen_period}, "
+                f"Available slots: {slot_options}"
+            ),
         )
         history.append({"role": "assistant", "content": ai_text})
-        return update_state(state, slot_stage="ask_slot", slot_chosen_date=chosen_date, slot_chosen_period=chosen_period, slot_available_list=period_slots, speech_ai_text=ai_text, slot_selection_history=history)
+        return update_state(
+            state,
+            slot_stage="ask_slot",
+            slot_chosen_date=chosen_date,
+            slot_chosen_period=chosen_period,
+            slot_available_list=period_slots,
+            speech_ai_text=ai_text,
+            slot_selection_history=history,
+        )
 
     ai_text = await _speak(
         history, doctor_name,
-        situation="multiple time periods are available for the chosen date — ask the patient which part of the day they prefer",
+        situation=(
+            "multiple time periods are available for the chosen date — "
+            "ask the patient which part of the day they prefer"
+        ),
         context=f"Date: {format_date(chosen_date)}, Available periods: {', '.join(period_names)}",
     )
     history.append({"role": "assistant", "content": ai_text})
-    return update_state(state, slot_stage="ask_period", slot_chosen_date=chosen_date, speech_ai_text=ai_text, slot_selection_history=history)
+    return update_state(
+        state,
+        slot_stage="ask_period",
+        slot_chosen_date=chosen_date,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
 
 
-async def _handle_ask_period(state: dict, user_text: str, doctor_name: str, all_slots: list[dict]) -> dict:
+async def _handle_ask_period(
+    state: dict, user_text: str, doctor_name: str, all_slots: list[dict]
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     chosen_date: date = state.get("slot_chosen_date")
     user_change_request: str | None = state.get("user_change_request")
@@ -352,14 +577,24 @@ async def _handle_ask_period(state: dict, user_text: str, doctor_name: str, all_
     periods = group_slots_by_period(filtered or date_slots)
     period_names = list(periods.keys())
 
-    parsed = await _llm_extract(system=LLM_PERIOD_SYSTEM.format(available_periods=period_names), human=user_text)
+    parsed = await _llm_extract(
+        system=LLM_PERIOD_SYSTEM.format(available_periods=period_names),
+        human=user_text,
+    )
     chosen_period = (parsed.get("period") or "").lower()
 
     if chosen_period not in periods:
         ai_text = await _speak(
             history, doctor_name,
-            situation="the period the patient requested is not available — inform them and offer only the available periods listed in context",
-            context=f"Requested period: {chosen_period or 'unclear'}, Available periods: {', '.join(period_names)}, Date: {format_date(chosen_date)}",
+            situation=(
+                "the period the patient requested is not available — "
+                "inform them and offer only the available periods listed in context"
+            ),
+            context=(
+                f"Requested period: {chosen_period or 'unclear'}, "
+                f"Available periods: {', '.join(period_names)}, "
+                f"Date: {format_date(chosen_date)}"
+            ),
         )
         history.append({"role": "assistant", "content": ai_text})
         return update_state(state, slot_stage="ask_period", speech_ai_text=ai_text, slot_selection_history=history)
@@ -369,13 +604,26 @@ async def _handle_ask_period(state: dict, user_text: str, doctor_name: str, all_
     ai_text = await _speak(
         history, doctor_name,
         situation="present the available time slots for the period the patient chose and ask them to pick one",
-        context=f"Date: {format_date(chosen_date)}, Period: {chosen_period}, Available slots: {slot_options}",
+        context=(
+            f"Date: {format_date(chosen_date)}, "
+            f"Period: {chosen_period}, "
+            f"Available slots: {slot_options}"
+        ),
     )
     history.append({"role": "assistant", "content": ai_text})
-    return update_state(state, slot_stage="ask_slot", slot_chosen_period=chosen_period, slot_available_list=period_slots, speech_ai_text=ai_text, slot_selection_history=history)
+    return update_state(
+        state,
+        slot_stage="ask_slot",
+        slot_chosen_period=chosen_period,
+        slot_available_list=period_slots,
+        speech_ai_text=ai_text,
+        slot_selection_history=history,
+    )
 
 
-async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_slots: list[dict]) -> dict:
+async def _handle_ask_slot(
+    state: dict, user_text: str, doctor_name: str, all_slots: list[dict]
+) -> dict:
     history: list[dict] = list(state.get("slot_selection_history") or [])
     user_change_request: str | None = state.get("user_change_request")
     prev_start: str | None = state.get("slot_selected_start_time")
@@ -384,24 +632,48 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
     chosen_period: str | None = state.get("slot_chosen_period")
 
     date_slots = slots_for_date(all_slots, chosen_date)
-    period_slots = ([s for s in date_slots if s["period"] == chosen_period] if chosen_period else date_slots) or state.get("slot_available_list") or []
-    filtered = exclude_previously_selected_slot(period_slots, user_change_request, prev_start, prev_end) or period_slots
+    period_slots = (
+        [s for s in date_slots if s["period"] == chosen_period]
+        if chosen_period
+        else date_slots
+    )
+    if not period_slots:
+        period_slots = state.get("slot_available_list") or []
+
+    filtered = (
+        exclude_previously_selected_slot(period_slots, user_change_request, prev_start, prev_end)
+        or period_slots
+    )
 
     if user_change_request and not looks_like_slot_choice(user_text):
         slot_options = ", ".join(s["display"] for s in filtered)
         ai_text = await _speak(
             history, doctor_name,
-            situation="patient wants to change their slot — list all other available times from context and ask them to pick",
+            situation=(
+                "patient wants to change their slot — "
+                "list all other available times from context and ask them to pick"
+            ),
             context=f"Date: {format_date(chosen_date)}, Other available slots: {slot_options}",
         )
         history.append({"role": "assistant", "content": ai_text})
-        return update_state(state, slot_stage="ask_slot", slot_available_list=filtered, user_change_request=user_change_request, speech_ai_text=ai_text, slot_selection_history=history)
+        return update_state(
+            state,
+            slot_stage="ask_slot",
+            slot_available_list=filtered,
+            user_change_request=user_change_request,
+            speech_ai_text=ai_text,
+            slot_selection_history=history,
+        )
 
-    parsed = await _llm_extract(system=LLM_SLOT_SYSTEM.format(slots_context=build_slot_context_text(filtered)), human=user_text)
+    parsed = await _llm_extract(
+        system=LLM_SLOT_SYSTEM.format(slots_context=build_slot_context_text(filtered)),
+        human=user_text,
+    )
     slot_id = parsed.get("slot_id")
 
     if not slot_id:
         other_slots = [s for s in all_slots if s["date"] != chosen_date]
+
         if not other_slots:
             slot_options = ", ".join(s["display"] for s in filtered)
             ai_text = await _speak(
@@ -410,10 +682,19 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
                 context=f"Date: {format_date(chosen_date)}, Available slots: {slot_options}",
             )
             history.append({"role": "assistant", "content": ai_text})
-            return update_state(state, slot_stage="ask_slot", slot_available_list=filtered, speech_ai_text=ai_text, slot_selection_history=history)
+            return update_state(
+                state,
+                slot_stage="ask_slot",
+                slot_available_list=filtered,
+                speech_ai_text=ai_text,
+                slot_selection_history=history,
+            )
 
         next_dates = sorted({s["date"] for s in other_slots})[:2]
-        alt_slots = exclude_previously_selected_slot([s for s in all_slots if s["date"] in next_dates][:5], user_change_request, prev_start, prev_end)
+        alt_slots = exclude_previously_selected_slot(
+            [s for s in all_slots if s["date"] in next_dates][:5],
+            user_change_request, prev_start, prev_end,
+        )
         alt_options = ", ".join(s["full_display"] for s in alt_slots)
         ai_text = await _speak(
             history, doctor_name,
@@ -421,7 +702,13 @@ async def _handle_ask_slot(state: dict, user_text: str, doctor_name: str, all_sl
             context=f"Alternative slots: {alt_options}",
         )
         history.append({"role": "assistant", "content": ai_text})
-        return update_state(state, slot_stage="ask_alternate_slot", slot_available_list=alt_slots, speech_ai_text=ai_text, slot_selection_history=history)
+        return update_state(
+            state,
+            slot_stage="ask_alternate_slot",
+            slot_available_list=alt_slots,
+            speech_ai_text=ai_text,
+            slot_selection_history=history,
+        )
 
     matched = next((s for s in filtered if s["id"] == int(slot_id)), filtered[0])
     return await _resolve_and_confirm_slot({**state, "slot_selection_history": history}, matched)
@@ -434,9 +721,17 @@ async def _handle_ask_alternate_slot(state: dict, user_text: str, doctor_name: s
     prev_end: str | None = state.get("slot_selected_end_time")
 
     raw_slots = state.get("slot_available_list") or []
-    filtered = exclude_previously_selected_slot(raw_slots, user_change_request, prev_start, prev_end) or raw_slots
+    filtered = (
+        exclude_previously_selected_slot(raw_slots, user_change_request, prev_start, prev_end)
+        or raw_slots
+    )
 
-    parsed = await _llm_extract(system=LLM_ALTERNATE_SLOT_SYSTEM.format(slots_context=build_slot_context_text(filtered, use_full_display=True)), human=user_text)
+    parsed = await _llm_extract(
+        system=LLM_ALTERNATE_SLOT_SYSTEM.format(
+            slots_context=build_slot_context_text(filtered, use_full_display=True)
+        ),
+        human=user_text,
+    )
     slot_id = parsed.get("slot_id")
 
     if not slot_id:
@@ -446,13 +741,25 @@ async def _handle_ask_alternate_slot(state: dict, user_text: str, doctor_name: s
             context=f"Doctor: {doctor_name}",
         )
         history.append({"role": "assistant", "content": ai_text})
-        return update_state(state, slot_stage="ask_date", slot_chosen_date=None, slot_chosen_period=None, slot_available_list=None, speech_ai_text=ai_text, slot_selection_history=history)
+        return update_state(
+            state,
+            slot_stage="ask_date",
+            slot_chosen_date=None,
+            slot_chosen_period=None,
+            slot_available_list=None,
+            speech_ai_text=ai_text,
+            slot_selection_history=history,
+        )
 
     matched = next((s for s in filtered if s["id"] == int(slot_id)), filtered[0])
     return await _resolve_and_confirm_slot({**state, "slot_selection_history": history}, matched)
 
 
 _STAGE_HANDLERS = {
+    
+    "selecting":          lambda state, user_text, doctor_name, all_slots, available_dates:
+                          _handle_selecting(state, user_text, doctor_name, all_slots, available_dates),
+
     "ask_date":           lambda state, user_text, doctor_name, all_slots, available_dates:
                           _handle_ask_date(state, user_text, doctor_name, all_slots, available_dates),
     "confirm_date":       lambda state, user_text, doctor_name, all_slots, available_dates:
@@ -488,10 +795,18 @@ async def slot_selection_node(state: dict) -> dict:
         all_slots = await _fetch_all_slots(doctor_id)
     except Exception as e:
         print("[slot_selection_node] _fetch_all_slots failed:", e)
-        return update_state(state, slot_selection_completed=False, speech_ai_text="Sorry, I ran into an issue fetching available slots. Please try again.")
+        return update_state(
+            state,
+            slot_selection_completed=False,
+            speech_ai_text="Sorry, I ran into an issue fetching available slots. Please try again.",
+        )
 
     if not all_slots:
-        return update_state(state, slot_selection_completed=False, speech_ai_text=NO_SLOTS_RESPONSE.format(doctor_name=doctor_name))
+        return update_state(
+            state,
+            slot_selection_completed=False,
+            speech_ai_text=NO_SLOTS_RESPONSE.format(doctor_name=doctor_name),
+        )
 
     available_dates = get_available_dates(all_slots)
 
@@ -500,14 +815,16 @@ async def slot_selection_node(state: dict) -> dict:
 
     handler = _STAGE_HANDLERS.get(slot_stage)
     if handler is None:
-        print(f"[slot_selection_node] WARNING: unhandled stage='{slot_stage}'")
-        return state
+        print(f"[slot_selection_node] WARNING: unhandled stage='{slot_stage}' — recovering to initial")
+        return await _handle_initial(state, doctor_name)
 
     try:
         return await handler(state, user_text, doctor_name, all_slots, available_dates)
     except Exception as e:
         print(f"[slot_selection_node] stage={slot_stage} error:", e)
-        return update_state(state, speech_ai_text="Sorry, something went wrong. Could you please repeat that?")
+        return update_state(
+            state,
+            speech_ai_text="Sorry, something went wrong. Could you please repeat that?",
+        )
     
 
-    

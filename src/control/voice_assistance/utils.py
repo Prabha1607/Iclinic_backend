@@ -5,7 +5,7 @@ import re
 from datetime import date, time
 from twilio.twiml.voice_response import Gather, Say
 from src.config.settings import settings
-from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.models import astream_llm
 from src.control.voice_assistance.prompts.confirmation_node_prompt import (
     CONVERSATION_PROMPT,
     VERIFIER_PROMPT,
@@ -157,16 +157,6 @@ def build_conversation_string(history: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def build_symptoms_text(history: list[dict], topics: list[str]) -> str:
-    patient_turns = [t["text"] for t in history if t.get("role") == "patient"]
-    pairs = [
-        f"Q: {topic.capitalize()}\nA: {patient_turns[i] if i < len(patient_turns) else 'Not provided'}"
-        for i, topic in enumerate(topics)
-    ]
-    return "\n\n".join(pairs)
-
-
-
 
 async def verify_user_identity(
     user_text: str,
@@ -175,8 +165,12 @@ async def verify_user_identity(
         {"role": "system", "content": VERIFIER_PROMPT},
         {"role": "user", "content": f"Latest user reply: {user_text}"},
     ]
-    response = await ainvoke_llm(verify_messages)
-    data = json.loads(clear_markdown(response.content.strip()))
+
+    full_content = ""
+    async for token in astream_llm(verify_messages):
+        full_content += token
+
+    data = json.loads(clear_markdown(full_content.strip()))
 
     return (
         bool(data.get("confirmed", False)),

@@ -1,7 +1,15 @@
+import asyncio
 from typing import Dict, Any
-from src.control.voice_assistance.models import ainvoke_llm
+from src.control.voice_assistance.models import astream_llm
 from src.control.voice_assistance.prompts.confirmation_node_prompt import CONVERSATION_PROMPT
 from src.control.voice_assistance.utils import apply_corrections, verify_user_identity
+
+
+async def _collect(messages: list) -> str:
+    full_content = ""
+    async for token in astream_llm(messages):
+        full_content += token
+    return full_content
 
 
 async def identity_confirmation_node(state: Dict[str, Any]) -> Dict[str, Any]:
@@ -31,25 +39,29 @@ async def identity_confirmation_node(state: Dict[str, Any]) -> Dict[str, Any]:
             *history,
         ]
 
-        response = await ainvoke_llm(messages)
-        sentence = response.content.strip()
+        confirmed = False
+        corrected_name = None
+        corrected_phone = None
+
+        if user_text:
+            full_content, verify_result = await asyncio.gather(
+                _collect(messages),
+                verify_user_identity(user_text),
+            )
+            try:
+                confirmed, corrected_name, corrected_phone = verify_result
+            except Exception as e:
+                print("[VERIFIER ERROR]", e)
+        else:
+            full_content = await _collect(messages)
+
+        sentence = full_content.strip()
 
     except Exception as e:
         print("[LLM ERROR]", e)
         return state
 
-    confirmed = False
-    corrected_name = None
-    corrected_phone = None
-
-    if user_text:
-        try:
-            confirmed, corrected_name, corrected_phone = await verify_user_identity(user_text)
-        except Exception as e:
-            print("[VERIFIER ERROR]", e)
-
     state = apply_corrections(state, corrected_name, corrected_phone)
-
     conversation_history.append({"role": "assistant", "content": sentence})
 
     return {

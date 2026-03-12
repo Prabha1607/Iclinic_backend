@@ -183,4 +183,3 @@ async def pre_confirmation_node(state: dict) -> dict:
         booking_context_snapshot=snapshot,
         speech_ai_text=confirmation_text,
     )
-

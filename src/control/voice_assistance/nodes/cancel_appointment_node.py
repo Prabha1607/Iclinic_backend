@@ -1,5 +1,4 @@
 from datetime import datetime, timezone
-
 from src.data.clients.postgres_client import AsyncSessionLocal
 from src.data.models.postgres.appointment import Appointment
 from src.data.models.postgres.ENUM import AppointmentStatus

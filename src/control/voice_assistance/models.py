@@ -48,7 +48,6 @@ async def ainvoke_llm(messages):
         except Exception as e:
             last_error = e
 
-            # move to next key
             current_key_index = (current_key_index + 1) % len(API_KEYS)
             attempts += 1
 

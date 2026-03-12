@@ -1,10 +1,5 @@
 from datetime import datetime, timezone, date as date_type
-
-from sqlalchemy import select, and_
-
-from src.data.clients.postgres_client import AsyncSessionLocal
-from src.data.models.postgres.appointment import Appointment
-from src.data.models.postgres.appointment_type import AppointmentType
+from src.control.voice_assistance.call_cache import ensure_cache,_cache
 from src.data.models.postgres.ENUM import AppointmentStatus
 from src.control.voice_assistance.models import get_llama1
 from src.control.voice_assistance.utils import update_state
@@ -17,32 +12,22 @@ from src.control.voice_assistance.prompts.cancel_appointment_node_prompt import 
 )
 
 async def _fetch_upcoming_appointments(user_id: int) -> list:
+    await ensure_cache()
+
     now = datetime.now(timezone.utc)
-    async with AsyncSessionLocal() as session:
-        stmt = (
-            select(Appointment, AppointmentType.name.label("type_name"))
-            .join(AppointmentType, Appointment.appointment_type_id == AppointmentType.id)
-            .where(
-                and_(
-                    Appointment.user_id == user_id,
-                    Appointment.status == AppointmentStatus.SCHEDULED,
-                    Appointment.is_active == True,
-                    Appointment.scheduled_date >= date_type.today(),
-                )
-            )
-            .order_by(Appointment.scheduled_date.asc(), Appointment.scheduled_start_time.asc())
-        )
-        result = await session.execute(stmt)
-        rows = result.all()
 
     return [
-        row for row in rows
-        if datetime.combine(
-            row[0].scheduled_date,
-            row[0].scheduled_start_time,
+        (appt, type_name)
+        for appt, type_name in _cache["joined_appointments"]
+        if appt.user_id        == user_id
+        and appt.status        == AppointmentStatus.SCHEDULED
+        and appt.is_active     == True
+        and appt.scheduled_date >= date_type.today()
+        and datetime.combine(
+            appt.scheduled_date,
+            appt.scheduled_start_time,
         ).replace(tzinfo=timezone.utc) > now
     ]
-
 
 async def _llm_invoke(system: str, human: str) -> str:
     model = get_llama1()

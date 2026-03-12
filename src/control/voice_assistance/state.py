@@ -29,7 +29,6 @@ class VoiceState(TypedDict):
     clarify_conversation_history: Optional[List[Dict[str, str]]]
     clarify_covered_topics:       Optional[List[str]]
     clarify_completed:            Optional[bool]
-    clarify_symptoms_text:        Optional[str]
 
     mapping_intent:                     Optional[str]
     mapping_emergency:                  Optional[bool]
@@ -73,3 +72,5 @@ class VoiceState(TypedDict):
     cancellation_awaiting_fresh_input: Optional[bool]
     cancellation_confirmed:   Optional[bool]
     user_change_request:      Optional[str]
+
+    pipeline_start_time: Optional[float]
