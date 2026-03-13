@@ -85,6 +85,7 @@ async def make_call(
     try:
         user              = await get_user(current_user.get("email"), db)
         appointment_types = await get_appointment_types(db)
+        
     except Exception as e:
         logger.error("Failed to fetch required data for call", extra={"error": str(e)})
         return {"status": "error", "detail": "Failed to fetch required data"}
@@ -137,13 +138,8 @@ async def voice_response(request: Request):
         )
 
     try:
-        result = dict(state)
-
-        async for chunk in response_graph.astream(state):
-            for node_output in chunk.values():
-                if isinstance(node_output, dict):
-                    result.update(node_output)
-
+        result = await response_graph.ainvoke(state)
+            
     except Exception as e:
         logger.error("Response graph failed", extra={"call_sid": call_sid, "error": str(e)})
         result = {**state, "speech_ai_text": FALLBACK_TEXT}

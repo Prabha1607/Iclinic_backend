@@ -3,7 +3,6 @@ from src.control.voice_assistance.models import get_llama1
 from src.control.voice_assistance.utils import clear_markdown, update_state
 
 
-
 PRE_CONFIRMATION_SYSTEM_PROMPT = """
 You are a warm, professional medical receptionist confirming an appointment over the phone.
 
@@ -25,7 +24,10 @@ Return ONLY the spoken message. No JSON, no markdown, no extra commentary.
 """.strip()
 
 INTENT_DETECTION_SYSTEM_PROMPT = """
-You are analysing a patient's spoken reply to a booking confirmation question.
+You are analysing a patient's spoken reply to a booking confirmation question on a phone call.
+
+This is speech-to-text input — it may be noisy, clipped, or contain filler sounds like "ss", "um", "uh".
+Focus on the INTENT, not the exact words.
 
 Respond with a single JSON object:
 {
@@ -34,21 +36,28 @@ Respond with a single JSON object:
 }
 
 Rules:
-- confirmed = true  → patient clearly agreed, including ANY of:
-                       yes, correct, that's correct, that's right, right, confirmed,
-                       go ahead, sounds good, book it, okay, alright, sure, yep, yeah,
-                       perfect, exactly, absolutely, fine, proceed, do it, all good,
-                       "I'm telling you right", "that is correct", "yes that's fine",
-                       or any phrase that clearly expresses agreement even if informal
-- confirmed = false → patient EXPLICITLY said no / cancel / wrong / stop /
-                       do not book / don't book / change it / that's wrong / incorrect
-- uncertain = true  → reply is completely unrelated, garbled, or truly unrecognisable
-                       (random words, background noise, gibberish with no clear meaning)
-                       Set confirmed = false when uncertain = true.
 
-IMPORTANT: Be generous with confirmed = true. If the patient is expressing agreement
-in any natural way, mark it confirmed. Only mark uncertain if the reply has NO
-recognisable intent at all.
+confirmed = true when the patient expresses ANY form of agreement or intent to proceed, including:
+  - yes, yeah, yep, yup, correct, that's correct, that's right, right, confirmed
+  - go ahead, sounds good, book it, okay, ok, alright, sure, perfect, exactly, absolutely, fine
+  - proceed, continue, do it, all good, let's do it, that's fine, that works
+  - "I'm telling you right", "that is correct", "yes that's fine"
+  - any phrase where the patient is clearly saying yes or moving forward
+  - partial or noisy input that CONTAINS an agreement word anywhere (e.g. "ss continue", "um yes", "ok go")
+  - when in doubt, lean toward confirmed = true
+
+confirmed = false ONLY when the patient EXPLICITLY says no or wants to change something:
+  - no, nope, nahi, na, don't book, cancel, wrong, incorrect, change it, that's wrong
+  - stop, wait, different, not that, I want to change
+
+uncertain = true ONLY when the reply is pure gibberish with NO recognisable word at all
+  (random characters, complete silence, unintelligible noise with zero meaningful content)
+  Set confirmed = false when uncertain = true.
+
+IMPORTANT:
+- "continue", "proceed", "go ahead", "do it", "carry on" all mean confirmed = true
+- Noise or filler before/after an agreement word does NOT change the intent
+- Be very generous with confirmed = true — it is far better to proceed and let the patient correct you than to loop back unnecessarily
 
 Return ONLY the JSON object, nothing else.
 """.strip()
@@ -57,15 +66,15 @@ Return ONLY the JSON object, nothing else.
 def _build_snapshot(state: dict) -> dict:
     slot = state.get("slot_selected") or {}
     return {
-        "patient_name":    state.get("identity_user_name"),
-        "doctor_name":     state.get("doctor_confirmed_name"),
-        "appointment_slot": slot.get("full_display") or state.get("slot_booked_display"),
-        "appointment_date": slot.get("date"),
-        "appointment_time": f"{slot.get('start_time')} – {slot.get('end_time')}"
-                            if slot.get("start_time") else None,
+        "patient_name":       state.get("identity_user_name"),
+        "doctor_name":        state.get("doctor_confirmed_name"),
+        "appointment_slot":   slot.get("full_display") or state.get("slot_booked_display"),
+        "appointment_date":   slot.get("date"),
+        "appointment_time":   f"{slot.get('start_time')} – {slot.get('end_time')}"
+                              if slot.get("start_time") else None,
         "appointment_type_id": state.get("mapping_appointment_type_id"),
-        "symptoms_summary": state.get("clarify_symptoms_text"),
-        "reason_for_visit": state.get("booking_reason_for_visit"),
+        "symptoms_summary":   state.get("clarify_symptoms_text"),
+        "reason_for_visit":   state.get("booking_reason_for_visit"),
     }
 
 
@@ -86,10 +95,13 @@ async def _detect_user_intent(user_text: str) -> tuple[bool, bool]:
             ("human", f"Patient reply: \"{user_text}\"")
         ])
         parsed = json.loads(clear_markdown(response.content.strip()))
-        return bool(parsed.get("confirmed")), bool(parsed.get("uncertain"))
-    except Exception:
+        confirmed = bool(parsed.get("confirmed"))
+        uncertain = bool(parsed.get("uncertain"))
+        print(f"[pre_confirmation_node] intent detection: confirmed={confirmed} uncertain={uncertain}")
+        return confirmed, uncertain
+    except Exception as e:
+        print(f"[pre_confirmation_node] intent detection error: {e}")
         return False, True
-
 
 
 async def pre_confirmation_node(state: dict) -> dict:
@@ -124,7 +136,7 @@ async def pre_confirmation_node(state: dict) -> dict:
                     pre_confirmation_completed=False,
                     pre_confirmation_retry_count=0,
                     slot_selected=None,
-                    slot_stage="selecting",
+                    slot_stage="ask_date",
                     slot_selection_completed=False,
                     speech_ai_text=(
                         "I'm having a little trouble hearing you clearly. "
@@ -142,8 +154,7 @@ async def pre_confirmation_node(state: dict) -> dict:
                 pre_confirmation_retry_count=retry_count,
                 speech_ai_text=re_ask,
             )
-        
-        
+
         print("[pre_confirmation_node] User rejected — returning to slot selection")
         return update_state(
             state,
@@ -151,7 +162,7 @@ async def pre_confirmation_node(state: dict) -> dict:
             pre_confirmation_completed=False,
             pre_confirmation_retry_count=0,
             slot_selected=None,
-            slot_stage="selecting",
+            slot_stage="ask_date",
             slot_selection_completed=False,
             speech_ai_text=(
                 "No problem! Let me show you the available slots again "
@@ -183,4 +194,3 @@ async def pre_confirmation_node(state: dict) -> dict:
         booking_context_snapshot=snapshot,
         speech_ai_text=confirmation_text,
     )
-

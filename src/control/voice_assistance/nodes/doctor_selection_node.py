@@ -94,7 +94,10 @@ async def doctor_selection_node(state: dict) -> dict:
     intent: str = state.get("mapping_intent") or "general checkup"
 
     try:
-        doctors = await fetch_doctors(state.get("mapping_appointment_type_id") or -1)
+        appointment_type_id = state.get("mapping_appointment_type_id") or -1
+        print("appointment_type_id---------------",appointment_type_id)
+        doctors = await fetch_doctors(appointment_type_id)
+
     except Exception as e:
         print("[doctor_selection_node] fetch failed:", e)
         return {**state, "doctor_selection_completed": True, "speech_ai_text": NO_DOCTORS_RESPONSE}

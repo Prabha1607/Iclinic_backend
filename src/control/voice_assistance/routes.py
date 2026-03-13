@@ -9,7 +9,7 @@ def route_after_stt(state: dict) -> str:
         if not state.get("clarify_completed"):
             return "clarify"
         if not state.get("mapping_appointment_type_completed"):
-            return "mapping"
+            return "clarify"
         if not state.get("doctor_selection_completed"):
             return "doctor_selection"
         if not state.get("slot_selection_completed"):
@@ -75,7 +75,7 @@ def route_after_clarify(state: dict) -> str:
         return "tts"
     if not state.get("clarify_completed"):
         return "tts"
-    return "mapping"
+    return "doctor_selection"
 
 
 def route_after_doctor_selection(state: dict) -> str:

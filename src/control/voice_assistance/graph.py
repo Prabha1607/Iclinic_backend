@@ -14,7 +14,6 @@ from .nodes.call_init_node                      import call_init_node
 from .nodes.stt_node                            import stt_node
 from .nodes.identity_confirmation_node          import identity_confirmation_node
 from .nodes.clarify_node                        import clarify_node
-from .nodes.mapping_node                        import mapping_node
 from .nodes.tts_node                            import tts_node
 from .nodes.doctor_selection_node               import doctor_selection_node
 from .nodes.booking_slot_selection_node         import slot_selection_node
@@ -43,7 +42,6 @@ def build_response_graph():
     workflow.add_node("service_intent",               service_intent_node)
     workflow.add_node("identity_confirmation",        identity_confirmation_node)
     workflow.add_node("clarify",                      clarify_node)
-    workflow.add_node("mapping",                      mapping_node)
     workflow.add_node("doctor_selection",             doctor_selection_node)
     workflow.add_node("slot_selection",               slot_selection_node)
     workflow.add_node("pre_confirmation",             pre_confirmation_node)
@@ -63,7 +61,6 @@ def build_response_graph():
             "service_intent":               "service_intent",
             "identity_confirmation":        "identity_confirmation",
             "clarify":                      "clarify",
-            "mapping":                      "mapping",
             "doctor_selection":             "doctor_selection",
             "slot_selection":               "slot_selection",
             "pre_confirmation":             "pre_confirmation",
@@ -93,10 +90,9 @@ def build_response_graph():
     workflow.add_conditional_edges(
         "clarify",
         route_after_clarify,
-        {"tts": "tts", "mapping": "mapping"},
+        {"tts": "tts", "doctor_selection": "doctor_selection"},  
     )
 
-    workflow.add_edge("mapping", "doctor_selection")
 
     workflow.add_conditional_edges(
         "doctor_selection",
@@ -122,7 +118,6 @@ def build_response_graph():
         },
     )
 
- 
     workflow.add_conditional_edges(
         "cancellation_slot_selection",
         route_after_cancellation_slot_selection,

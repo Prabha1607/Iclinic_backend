@@ -90,6 +90,8 @@ Return JSON with key "intent" only."""
 
 
 async def mapping_node(state: dict) -> dict:
+    print("[conversation_history]:", state.get("clarify_conversation_history"))  # add this
+
     print("[mapping_node] -----------------------------")
 
     if state.get("mapping_emergency"):
